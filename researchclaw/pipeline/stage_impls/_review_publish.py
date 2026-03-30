@@ -41,6 +41,65 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Semantic Scholar attribution — required by S2 API Dataset License terms.
+# Automatically appended to the Acknowledgments section of every paper.
+# ---------------------------------------------------------------------------
+
+_S2_ATTRIBUTION = (
+    "Literature search and bibliographic data were obtained from the "
+    "Semantic Scholar Academic Graph API (https://www.semanticscholar.org/) "
+    "provided by the Allen Institute for AI."
+)
+
+_S2_ATTRIBUTION_MARKER = "Semantic Scholar"
+
+
+def _ensure_s2_attribution(paper: str) -> str:
+    """Ensure Semantic Scholar attribution exists in the paper text.
+
+    If an Acknowledgments section already mentions Semantic Scholar, no change
+    is made.  Otherwise the attribution is appended to an existing
+    Acknowledgments section, or a new one is created before References.
+    """
+    if _S2_ATTRIBUTION_MARKER in paper:
+        return paper  # already attributed
+
+    # Try to find existing Acknowledgments heading (## or #)
+    ack_pat = re.compile(
+        r"(^#{1,2}\s*Acknowledge?ments?\s*$)", re.IGNORECASE | re.MULTILINE
+    )
+    m_ack = ack_pat.search(paper)
+    if m_ack:
+        # Find the end of the Acknowledgments section (next heading or EOF)
+        next_heading = re.search(
+            r"^#{1,2}\s", paper[m_ack.end():], re.MULTILINE
+        )
+        if next_heading:
+            insert_pos = m_ack.end() + next_heading.start()
+        else:
+            insert_pos = len(paper)
+        paper = (
+            paper[:insert_pos].rstrip()
+            + "\n\n"
+            + _S2_ATTRIBUTION
+            + "\n\n"
+            + paper[insert_pos:]
+        )
+        return paper
+
+    # No Acknowledgments section — insert one before References
+    ref_pat = re.compile(r"^#{1,2}\s*References\s*$", re.IGNORECASE | re.MULTILINE)
+    m_ref = ref_pat.search(paper)
+    ack_block = f"\n\n## Acknowledgments\n\n{_S2_ATTRIBUTION}\n\n"
+    if m_ref:
+        paper = paper[: m_ref.start()] + ack_block + paper[m_ref.start():]
+    else:
+        # No References section either — append at the end
+        paper = paper.rstrip() + ack_block
+    return paper
+
+
+# ---------------------------------------------------------------------------
 # Helpers imported from executor.py (not yet moved to _helpers.py).
 # Lazy-imported inside functions to avoid circular import when executor.py
 # imports this module.
@@ -1641,6 +1700,9 @@ def _execute_export_publish(
             "IMP-24: Numbers repeated >3 times: %s",
             _repeated,
         )
+
+    # --- Semantic Scholar attribution (required by S2 API terms) ---
+    final_paper = _ensure_s2_attribution(final_paper)
 
     (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
 

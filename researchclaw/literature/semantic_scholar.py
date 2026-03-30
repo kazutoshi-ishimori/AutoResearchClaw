@@ -175,7 +175,7 @@ def search_semantic_scholar(
     # Rate limiting: locked to serialize concurrent callers
     with _rate_lock:
         now = time.monotonic()
-        rate_limit = 0.3 if api_key else _RATE_LIMIT_SEC
+        rate_limit = 1.0 if api_key else _RATE_LIMIT_SEC
         elapsed_since_last = now - _last_request_time
         if elapsed_since_last < rate_limit:
             time.sleep(rate_limit - elapsed_since_last)
@@ -286,7 +286,7 @@ def batch_fetch_papers(
         return []
 
     global _last_request_time  # noqa: PLW0603
-    rate = 0.3 if api_key else _RATE_LIMIT_SEC
+    rate = 1.0 if api_key else _RATE_LIMIT_SEC
     with _rate_lock:
         now = time.monotonic()
         elapsed = now - _last_request_time
