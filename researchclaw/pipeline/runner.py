@@ -484,6 +484,38 @@ def execute_pipeline(
 
         stage_num = int(stage)
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
+        if stage == Stage.PAPER_OUTLINE:
+            _promote_best_stage14(run_dir, config)
+            _quality_ok, _quality_msg = _check_experiment_quality(
+                run_dir,
+                _read_pivot_count(run_dir),
+                missing_summary_ok=True,
+            )
+            if not _quality_ok:
+                stage_dir = run_dir / f"stage-{stage_num:02d}"
+                stage_dir.mkdir(parents=True, exist_ok=True)
+                guardrail = {
+                    "ok": False,
+                    "reason": _quality_msg,
+                    "generated": _utcnow_iso(),
+                }
+                (stage_dir / "experiment_guardrail.json").write_text(
+                    json.dumps(guardrail, indent=2), encoding="utf-8"
+                )
+                result = StageResult(
+                    stage=stage,
+                    status=StageStatus.FAILED,
+                    artifacts=("experiment_guardrail.json",),
+                    evidence_refs=("stage-16/experiment_guardrail.json",),
+                    error=(
+                        "Experiment metrics are not usable for paper writing: "
+                        f"{_quality_msg}"
+                    ),
+                )
+                results.append(result)
+                print(f"{prefix} {stage.name} — FAILED (0.0s) — {result.error}")
+                break
+
         print(f"{prefix} {stage.name} — running...")
 
         # ── Event log: stage start ──
@@ -512,9 +544,6 @@ def execute_pipeline(
         # iteration's data, because the post-recursion promotion at line
         # ~547 runs only after the recursive call—i.e. after the paper
         # has already been written.
-        if stage == Stage.PAPER_OUTLINE:
-            _promote_best_stage14(run_dir, config)
-
         t0 = _time.monotonic()
 
         result = execute_stage(
@@ -1346,7 +1375,10 @@ def _promote_best_stage14(run_dir: Path, config: RCConfig) -> None:
 
 
 def _check_experiment_quality(
-    run_dir: Path, pivot_count: int
+    run_dir: Path,
+    pivot_count: int,
+    *,
+    missing_summary_ok: bool = False,
 ) -> tuple[bool, str]:
     """Quality gate before forced PROCEED.
 
@@ -1365,6 +1397,8 @@ def _check_experiment_quality(
                 break
 
     if not summary_path.exists():
+        if missing_summary_ok:
+            return True, "No experiment_summary.json found"
         return False, "No experiment_summary.json found — no metrics produced"
 
     try:
@@ -1375,6 +1409,8 @@ def _check_experiment_quality(
     # Check 1: Are all metrics zero?
     ms = data.get("metrics_summary", {})
     if isinstance(ms, dict):
+        if not ms:
+            return False, "Experiment metrics are empty — no usable quantitative results"
         values: list[float] = []
         for k, v in ms.items():
             if isinstance(v, (int, float)):

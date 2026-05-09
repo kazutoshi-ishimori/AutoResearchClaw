@@ -2071,6 +2071,8 @@ def _execute_export_publish(
         )
 
     # Conference template: generate .tex file
+    _latex_compile_ok = False
+    _latex_errors: list[str] = []
     try:
         from researchclaw.templates import get_template, markdown_to_latex
 
@@ -2308,11 +2310,33 @@ def _execute_export_publish(
         try:
             from researchclaw.templates.compiler import compile_latex
             _compile_result = compile_latex(stage_dir / "paper.tex", max_attempts=2)
+            (stage_dir / "latex_compile_report.json").write_text(
+                json.dumps(
+                    {
+                        "success": _compile_result.success,
+                        "attempts": _compile_result.attempts,
+                        "errors": _compile_result.errors,
+                        "warnings": _compile_result.warnings,
+                        "fixes_applied": _compile_result.fixes_applied,
+                        "log_excerpt": _compile_result.log_excerpt,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            artifacts.append("latex_compile_report.json")
             if _compile_result.success:
-                logger.info("Stage 22: LaTeX compilation verification PASSED")
-                artifacts.append("paper.pdf")
                 # PDF-as-reviewer: LLM-based visual review of compiled PDF
                 _pdf_path = stage_dir / "paper.pdf"
+                if _pdf_path.exists():
+                    _latex_compile_ok = True
+                    logger.info("Stage 22: LaTeX compilation verification PASSED")
+                    artifacts.append("paper.pdf")
+                else:
+                    _latex_errors.append(
+                        "LaTeX compiler reported success but paper.pdf was not produced"
+                    )
+                    logger.warning("Stage 22: LaTeX compilation produced no paper.pdf")
                 if _pdf_path.exists() and llm is not None:
                     try:
                         _pdf_review = _get_review_compiled_pdf()(
@@ -2372,6 +2396,7 @@ def _execute_export_publish(
                     logger.debug("Stage 22: Quality checks skipped: %s", _qc_exc)
             else:
                 logger.warning("Stage 22: LaTeX compilation verification FAILED: %s", _compile_result.errors[:3])
+                _latex_errors.extend(_compile_result.errors or ["LaTeX compilation failed"])
                 # Add compilation failure comment to .tex
                 _tex_path = stage_dir / "paper.tex"
                 if _tex_path.exists():
@@ -2384,12 +2409,25 @@ def _execute_export_publish(
                         )
                         _tex_path.write_text(_tex_content, encoding="utf-8")
         except Exception as _compile_exc:  # noqa: BLE001
-            logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
+            _latex_errors.append(f"LaTeX compile verification failed: {_compile_exc}")
+            logger.warning("Stage 22: Compile verification failed: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("LaTeX generation failed: %s", exc, exc_info=True)
+        _latex_errors.append(f"LaTeX generation failed: {exc}")
 
     # (Charts, BUG-99 path fix, and remove_missing_figures are now handled
     #  BEFORE compile_latex() — see "Pre-compilation" block above.)
+
+    if not _latex_compile_ok:
+        if not _latex_errors:
+            _latex_errors.append("paper.pdf was not produced")
+        return StageResult(
+            stage=Stage.EXPORT_PUBLISH,
+            status=StageStatus.FAILED,
+            artifacts=tuple(artifacts),
+            evidence_refs=tuple(f"stage-22/{a}" for a in artifacts),
+            error="PDF/LaTeX export failed: " + "; ".join(_latex_errors[:3]),
+        )
 
     # --- Code packaging: multi-file directory or single file ---
     exp_final_dir_path = _read_prior_artifact(run_dir, "experiment_final/")
@@ -2665,13 +2703,15 @@ def _execute_citation_verify(
         VerifyStatus,
         annotate_paper_hallucinations,
         filter_verified_bibtex,
+        parse_bibtex_entries,
         verify_citations,
     )
 
     bib_text = _read_prior_artifact(run_dir, "references.bib") or ""
     paper_text = _read_prior_artifact(run_dir, "paper_final.md") or ""
+    bib_entries = parse_bibtex_entries(bib_text)
 
-    if not bib_text.strip():
+    if not bib_entries:
         report_data = {
             "summary": {
                 "total": 0,
@@ -2679,10 +2719,10 @@ def _execute_citation_verify(
                 "suspicious": 0,
                 "hallucinated": 0,
                 "skipped": 0,
-                "integrity_score": 1.0,
+                "integrity_score": 0.0,
             },
             "results": [],
-            "note": "No references.bib found — nothing to verify.",
+            "note": "references.bib is missing or contains no BibTeX entries.",
         }
         (stage_dir / "verification_report.json").write_text(
             json.dumps(report_data, indent=2), encoding="utf-8"
@@ -2698,18 +2738,18 @@ def _execute_citation_verify(
             )
         return StageResult(
             stage=Stage.CITATION_VERIFY,
-            status=StageStatus.DONE,
+            status=StageStatus.FAILED,
             artifacts=("verification_report.json", "references_verified.bib"),
             evidence_refs=(
                 "stage-23/verification_report.json",
                 "stage-23/references_verified.bib",
             ),
+            error="Citation verification failed: references.bib is empty or missing",
         )
 
     s2_api_key = getattr(config.llm, "s2_api_key", "") or ""
 
-    from researchclaw.literature.verify import parse_bibtex_entries
-    _n_entries = len(parse_bibtex_entries(bib_text))
+    _n_entries = len(bib_entries)
     logger.info(
         "[citation-verify] Verifying %d references "
         "(DOI→CrossRef > OpenAlex > arXiv > S2)…",
