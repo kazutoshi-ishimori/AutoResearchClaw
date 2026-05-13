@@ -71,6 +71,199 @@ def _plan_field_names(items: list) -> list[str]:
     return result
 
 
+_SINGLE_CELL_TOPIC_TERMS = (
+    "single cell",
+    "single-cell",
+    "scrna",
+    "scrna-seq",
+    "h5ad",
+    "anndata",
+    "scanpy",
+    "scvi",
+    "fly cell atlas",
+    "cell atlas",
+    "drosophila ecdysone",
+)
+
+_GENERIC_IMAGE_BENCHMARK_TERMS = (
+    "cifar",
+    "mnist",
+    "fashionmnist",
+    "fashion mnist",
+    "stl-10",
+    "stl10",
+    "svhn",
+    "celeba",
+    "imagenet",
+    "torchvision.datasets",
+)
+
+_GENERIC_CITATION_GRAPH_BENCHMARK_TERMS = (
+    "planetoid",
+    "pubmed",
+    "cora",
+    "citeseer",
+    "torch_geometric.datasets.planetoid",
+)
+
+
+def _profile_id(domain_profile: Any | None) -> str:
+    return str(getattr(domain_profile, "domain_id", "") or "")
+
+
+def _profile_display(domain_profile: Any | None) -> str:
+    return str(getattr(domain_profile, "display_name", "") or "")
+
+
+def _flatten_guardrail_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return " ".join(
+            f"{k} {_flatten_guardrail_text(v)}" for k, v in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_flatten_guardrail_text(item) for item in value)
+    return str(value)
+
+
+def _contains_guardrail_term(text: str, term: str) -> bool:
+    haystack = text.lower()
+    needle = term.lower()
+    if "." in needle or "_" in needle:
+        return needle in haystack
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])",
+        haystack,
+    ) is not None
+
+
+def _is_single_cell_topic(
+    topic: str,
+    domain_profile: Any | None,
+    plan: dict[str, Any] | None = None,
+) -> bool:
+    domain_id = _profile_id(domain_profile)
+    if domain_id == "biology_singlecell":
+        return True
+    context = " ".join(
+        (
+            topic,
+            domain_id,
+            _profile_display(domain_profile),
+            _flatten_guardrail_text(plan) if plan else "",
+        )
+    )
+    return any(
+        _contains_guardrail_term(context, term)
+        for term in _SINGLE_CELL_TOPIC_TERMS
+    )
+
+
+def _collect_guardrail_texts(value: Any, location: str) -> list[tuple[str, str]]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        texts: list[tuple[str, str]] = []
+        for key, item in value.items():
+            texts.extend(_collect_guardrail_texts(item, f"{location}.{key}"))
+        return texts
+    if isinstance(value, (list, tuple, set)):
+        texts = []
+        for index, item in enumerate(value):
+            texts.extend(_collect_guardrail_texts(item, f"{location}[{index}]"))
+        return texts
+    return [(location, str(value))]
+
+
+def _collect_plan_benchmark_texts(plan: dict[str, Any]) -> list[tuple[str, str]]:
+    texts: list[tuple[str, str]] = []
+    for key in ("dataset", "datasets", "benchmark", "benchmarks"):
+        if key in plan:
+            texts.extend(_collect_guardrail_texts(plan.get(key), f"exp_plan.{key}"))
+    return texts
+
+
+def _collect_benchmark_plan_texts(
+    benchmark_plan: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    if not isinstance(benchmark_plan, dict):
+        return []
+    texts: list[tuple[str, str]] = []
+    selected_keys = (
+        "selected_benchmarks",
+        "selected_datasets",
+        "final_benchmarks",
+        "final_datasets",
+    )
+    for key in selected_keys:
+        if key in benchmark_plan:
+            texts.extend(
+                _collect_guardrail_texts(
+                    benchmark_plan.get(key),
+                    f"benchmark_plan.{key}",
+                )
+            )
+    return texts
+
+
+def _validate_domain_benchmark_guardrail(
+    *,
+    topic: str,
+    domain_profile: Any | None,
+    plan: dict[str, Any],
+    benchmark_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reject generic benchmark choices only when they conflict with the topic.
+
+    Single-cell/FCA/h5ad work should not silently drift into generic vision or
+    citation-graph benchmarks. Vision and graph ML domains can still use those
+    benchmarks normally.
+    """
+    domain_id = _profile_id(domain_profile) or "unknown"
+    single_cell_domain = _is_single_cell_topic(topic, domain_profile, plan)
+    result: dict[str, Any] = {
+        "ok": True,
+        "domain_id": domain_id,
+        "single_cell_domain": single_cell_domain,
+        "violations": [],
+        "warnings": [],
+    }
+    if not single_cell_domain:
+        return result
+
+    targets = _collect_plan_benchmark_texts(plan)
+    targets.extend(_collect_benchmark_plan_texts(benchmark_plan))
+
+    families = (
+        ("image_classification", _GENERIC_IMAGE_BENCHMARK_TERMS),
+        ("citation_graph", _GENERIC_CITATION_GRAPH_BENCHMARK_TERMS),
+    )
+    seen: set[tuple[str, str, str]] = set()
+    for location, text in targets:
+        for family, terms in families:
+            for term in terms:
+                if not _contains_guardrail_term(text, term):
+                    continue
+                marker = (family, term, location)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                result["violations"].append({
+                    "family": family,
+                    "term": term,
+                    "location": location,
+                    "message": (
+                        f"Single-cell/FCA/h5ad experiment selected generic "
+                        f"{family} benchmark '{term}' at {location}."
+                    ),
+                })
+
+    if result["violations"]:
+        result["ok"] = False
+    return result
+
+
 def _execute_experiment_design(
     stage_dir: Path,
     run_dir: Path,
@@ -524,9 +717,48 @@ def _execute_experiment_design(
         yaml.dump(plan, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
+    _benchmark_plan_dict = None
+    if _benchmark_plan is not None:
+        try:
+            _benchmark_plan_dict = _benchmark_plan.to_dict()
+        except Exception:  # noqa: BLE001
+            _benchmark_plan_dict = None
+    _guardrail_report = _validate_domain_benchmark_guardrail(
+        topic=config.research.topic,
+        domain_profile=_domain_profile or _ba_domain_profile,
+        plan=plan,
+        benchmark_plan=_benchmark_plan_dict,
+    )
+    (stage_dir / "domain_benchmark_guardrail.json").write_text(
+        json.dumps(_guardrail_report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if not _guardrail_report["ok"]:
+        _messages = [
+            str(v.get("message", v))
+            for v in _guardrail_report.get("violations", [])
+        ]
+        _error = (
+            "Stage 9 domain benchmark guardrail rejected incompatible benchmarks: "
+            + "; ".join(_messages)
+        )
+        logger.error(_error)
+        return StageResult(
+            stage=Stage.EXPERIMENT_DESIGN,
+            status=StageStatus.FAILED,
+            artifacts=("exp_plan.yaml", "domain_benchmark_guardrail.json"),
+            error=_error,
+            evidence_refs=(
+                "stage-09/exp_plan.yaml",
+                "stage-09/domain_benchmark_guardrail.json",
+            ),
+        )
     return StageResult(
         stage=Stage.EXPERIMENT_DESIGN,
         status=StageStatus.DONE,
-        artifacts=("exp_plan.yaml",),
-        evidence_refs=("stage-09/exp_plan.yaml",),
+        artifacts=("exp_plan.yaml", "domain_benchmark_guardrail.json"),
+        evidence_refs=(
+            "stage-09/exp_plan.yaml",
+            "stage-09/domain_benchmark_guardrail.json",
+        ),
     )

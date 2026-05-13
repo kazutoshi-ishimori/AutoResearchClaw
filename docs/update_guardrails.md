@@ -11,6 +11,9 @@ MetaClaw updates.
   `paper.pdf` is not produced.
 - Stage 23 must fail citation verification when `references.bib` is missing
   or contains no BibTeX entries.
+- Stage 9 must fail single-cell/FCA/h5ad experiment designs that select generic
+  image or citation-graph benchmarks, while leaving vision and graph ML topics
+  free to use those benchmarks.
 - MetaClaw's OpenAI-compatible proxy must retry transient upstream 5xx/HTML
   responses from OpenRouter and fail explicitly if retries are exhausted.
 

@@ -9,6 +9,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 "$PYTHON_BIN" -m pytest \
+  tests/test_experiment_design_guardrail.py \
   tests/test_pipeline_guardrails.py \
   tests/test_update_guardrails.py \
   tests/test_rc_e2e_regression.py \
