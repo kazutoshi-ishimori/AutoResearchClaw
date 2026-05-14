@@ -649,6 +649,67 @@ class TestArxivCircuitBreaker:
         papers = search_arxiv("test", limit=5)
         assert papers == []
 
+    def test_rate_limiter_waits_between_arxiv_api_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Back-to-back arXiv API calls should observe the 3s ToU gap."""
+        from researchclaw.literature import arxiv_client
+
+        class FakeClock:
+            now = 100.0
+            sleeps: list[float] = []
+
+            @classmethod
+            def monotonic(cls) -> float:
+                return cls.now
+
+            @classmethod
+            def sleep(cls, seconds: float) -> None:
+                cls.sleeps.append(seconds)
+                cls.now += seconds
+
+        monkeypatch.setattr(arxiv_client.time, "monotonic", FakeClock.monotonic)
+        monkeypatch.setattr(arxiv_client.time, "sleep", FakeClock.sleep)
+        arxiv_client._reset_circuit_breaker()
+
+        assert arxiv_client._run_arxiv_api_call(lambda: "first") == "first"
+        FakeClock.now += 1.0
+        assert arxiv_client._run_arxiv_api_call(lambda: "second") == "second"
+
+        assert FakeClock.sleeps == [pytest.approx(2.2)]
+
+    def test_search_arxiv_caps_requested_limit_for_single_query(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Single arXiv queries should not request heavy 100+ result pages."""
+        import types
+
+        from researchclaw.literature import arxiv_client
+
+        _fake_arxiv = types.ModuleType("arxiv")
+        _fake_arxiv.HTTPError = RuntimeError
+        _fake_arxiv.UnexpectedEmptyPageError = RuntimeError
+        _fake_arxiv.SortCriterion = MagicMock(Relevance="relevance")
+        _fake_arxiv.SortOrder = MagicMock(Descending="descending")
+
+        captured: dict[str, int] = {}
+
+        class FakeSearch:
+            def __init__(self, **kwargs: Any) -> None:
+                captured["max_results"] = kwargs["max_results"]
+
+        _fake_arxiv.Search = FakeSearch
+        monkeypatch.setattr(arxiv_client, "arxiv", _fake_arxiv)
+        monkeypatch.setattr(
+            arxiv_client,
+            "_get_client",
+            lambda: MagicMock(results=lambda _s: []),
+        )
+        arxiv_client._reset_circuit_breaker()
+
+        assert search_arxiv("test", limit=100) == []
+        assert captured["max_results"] == 50
+
 
 # ──────────────────────────────────────────────────────────────────────
 # OpenAlex client tests

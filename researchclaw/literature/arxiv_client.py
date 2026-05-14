@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 try:
     import arxiv  # pip install arxiv
@@ -31,6 +31,8 @@ from researchclaw.literature.models import Author, Paper
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 # ---------------------------------------------------------------------------
 # Circuit breaker (kept for extra safety on top of arxiv library retries)
 # ---------------------------------------------------------------------------
@@ -38,6 +40,8 @@ logger = logging.getLogger(__name__)
 _CB_THRESHOLD = 3
 _CB_INITIAL_COOLDOWN = 180
 _CB_MAX_COOLDOWN = 600
+_ARXIV_MIN_REQUEST_INTERVAL_SEC = 3.2
+_ARXIV_MAX_RESULTS_PER_QUERY = 50
 
 _CB_CLOSED = "closed"
 _CB_OPEN = "open"
@@ -49,18 +53,23 @@ _cb_cooldown_sec: float = _CB_INITIAL_COOLDOWN
 _cb_open_since: float = 0.0
 _cb_trip_count: int = 0
 _cb_lock = threading.Lock()
+_arxiv_request_lock = threading.Lock()
+_last_arxiv_request_at: float | None = None
 
 
 def _reset_circuit_breaker() -> None:
     """Reset circuit breaker state (for tests)."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
     global _cb_open_since, _cb_trip_count  # noqa: PLW0603
+    global _last_arxiv_request_at  # noqa: PLW0603
     with _cb_lock:
         _cb_state = _CB_CLOSED
         _cb_consecutive_429s = 0
         _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
         _cb_open_since = 0.0
         _cb_trip_count = 0
+    with _arxiv_request_lock:
+        _last_arxiv_request_at = None
 
 
 def _cb_should_allow() -> bool:
@@ -107,6 +116,24 @@ def _cb_on_failure() -> bool:
         return False
 
 
+def _run_arxiv_api_call(call: Callable[[], _T]) -> _T:
+    """Run one arXiv API operation under a process-wide ToU limiter."""
+    global _last_arxiv_request_at  # noqa: PLW0603
+    with _arxiv_request_lock:
+        if _last_arxiv_request_at is not None:
+            elapsed = time.monotonic() - _last_arxiv_request_at
+            remaining = _ARXIV_MIN_REQUEST_INTERVAL_SEC - elapsed
+            if remaining > 0:
+                logger.info(
+                    "[rate-limit] arXiv sleeping %.1fs before request", remaining
+                )
+                time.sleep(remaining)
+        try:
+            return call()
+        finally:
+            _last_arxiv_request_at = time.monotonic()
+
+
 # ---------------------------------------------------------------------------
 # Shared arxiv.Client instance (reuses connection, respects rate limits)
 # ---------------------------------------------------------------------------
@@ -119,8 +146,8 @@ def _get_client() -> arxiv.Client:
     global _client  # noqa: PLW0603
     if _client is None:
         _client = arxiv.Client(
-            page_size=100,       # fetch up to 100 per API call
-            delay_seconds=3.1,   # arXiv requires ≥3s between requests
+            page_size=_ARXIV_MAX_RESULTS_PER_QUERY,
+            delay_seconds=_ARXIV_MIN_REQUEST_INTERVAL_SEC,
             num_retries=3,       # built-in retry on failure
         )
     return _client
@@ -146,7 +173,7 @@ def search_arxiv(
         Free-text search query. Supports arXiv field syntax
         (e.g., ``ti:transformer``, ``au:vaswani``, ``cat:cs.LG``).
     limit:
-        Maximum number of results (up to 300).
+        Maximum number of results (capped at 50 per query to keep API load low).
     sort_by:
         Sort criterion: "relevance", "submitted_date", or "last_updated".
     year_min:
@@ -164,7 +191,7 @@ def search_arxiv(
         logger.info("[rate-limit] arXiv circuit breaker OPEN — skipping")
         return []
 
-    limit = min(limit, 300)
+    limit = min(limit, _ARXIV_MAX_RESULTS_PER_QUERY)
 
     sort_map = {
         "relevance": arxiv.SortCriterion.Relevance,
@@ -183,7 +210,8 @@ def search_arxiv(
     papers: list[Paper] = []
     try:
         client = _get_client()
-        for result in client.results(search):
+        results = _run_arxiv_api_call(lambda: list(client.results(search)))
+        for result in results:
             paper = _convert_result(result)
             if year_min > 0 and paper.year < year_min:
                 continue
@@ -211,7 +239,8 @@ def get_paper_by_id(arxiv_id: str) -> Paper | None:
     try:
         search = arxiv.Search(id_list=[arxiv_id])
         client = _get_client()
-        for result in client.results(search):
+        results = _run_arxiv_api_call(lambda: list(client.results(search)))
+        for result in results:
             return _convert_result(result)
     except Exception as exc:  # noqa: BLE001
         logger.warning("arXiv ID lookup failed for %s: %s", arxiv_id, exc)
@@ -245,14 +274,18 @@ def download_pdf(
     try:
         search = arxiv.Search(id_list=[arxiv_id])
         client = _get_client()
-        for result in client.results(search):
-            dirpath = Path(dirpath)
-            dirpath.mkdir(parents=True, exist_ok=True)
-            fname = filename or f"{arxiv_id.replace('/', '_')}.pdf"
-            result.download_pdf(dirpath=str(dirpath), filename=fname)
-            pdf_path = dirpath / fname
-            logger.info("Downloaded arXiv PDF: %s → %s", arxiv_id, pdf_path)
-            return pdf_path
+        def _download() -> Path | None:
+            for result in client.results(search):
+                out_dir = Path(dirpath)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                fname = filename or f"{arxiv_id.replace('/', '_')}.pdf"
+                result.download_pdf(dirpath=str(out_dir), filename=fname)
+                pdf_path = out_dir / fname
+                logger.info("Downloaded arXiv PDF: %s → %s", arxiv_id, pdf_path)
+                return pdf_path
+            return None
+
+        return _run_arxiv_api_call(_download)
     except Exception as exc:  # noqa: BLE001
         logger.warning("PDF download failed for %s: %s", arxiv_id, exc)
     return None
