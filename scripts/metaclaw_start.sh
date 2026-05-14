@@ -11,17 +11,15 @@ set -e
 MODE="${1:-skills_only}"
 PORT="${2:-30000}"
 
-METACLAW_DIR="/home/jqliu/projects/MetaClaw"
-VENV="$METACLAW_DIR/.venv"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+METACLAW_BIN="${METACLAW_BIN:-$REPO_ROOT/.venv/bin/metaclaw}"
 
-if [ ! -d "$VENV" ]; then
-    echo "ERROR: MetaClaw venv not found at $VENV"
-    echo "Run: cd $METACLAW_DIR && python -m venv .venv && source .venv/bin/activate && pip install -e '.[evolve,embedding]'"
+if [ ! -x "$METACLAW_BIN" ]; then
+    echo "ERROR: metaclaw executable not found at $METACLAW_BIN"
+    echo "Run: $REPO_ROOT/.venv/bin/python -m pip install -e $REPO_ROOT/.external/MetaClaw"
     exit 1
 fi
 
 echo "Starting MetaClaw in ${MODE} mode on port ${PORT}..."
-
-# Activate venv and start
-source "$VENV/bin/activate"
-exec metaclaw start --mode "$MODE" --port "$PORT"
+exec "$METACLAW_BIN" start --mode "$MODE" --port "$PORT"

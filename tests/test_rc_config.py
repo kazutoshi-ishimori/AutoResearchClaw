@@ -235,6 +235,19 @@ def test_rcconfig_from_dict_parses_llm_wire_api(tmp_path: Path):
     assert config.llm.wire_api == "responses"
 
 
+def test_rcconfig_from_dict_reads_s2_api_key_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    data = _valid_config_data()
+    data["llm"]["s2_api_key_env"] = "TEST_S2_API_KEY"
+    monkeypatch.setenv("TEST_S2_API_KEY", "s2-test-key")
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert config.llm.s2_api_key == "s2-test-key"
+    assert config.llm.s2_api_key_env == "TEST_S2_API_KEY"
+
+
 def test_rcconfig_from_dict_missing_fields_raises_value_error(tmp_path: Path):
     data = _valid_config_data()
     del data["runtime"]

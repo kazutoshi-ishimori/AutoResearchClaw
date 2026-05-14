@@ -78,6 +78,27 @@ def _expand_search_queries(queries: list[str], topic: str) -> list[str]:
     return expanded
 
 
+def _literature_limit_per_query(config: RCConfig) -> int:
+    """Bound per-source search pressure using the user's paper-count target."""
+    requested = max(1, int(config.research.daily_paper_count or 10))
+    return max(5, min(20, requested))
+
+
+def _cap_search_queries(queries: list[str], *, max_queries: int = 4) -> list[str]:
+    """Keep literature search broad enough without hammering rate-limited APIs."""
+    capped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = query.lower().strip()
+        if not normalized or normalized in seen:
+            continue
+        capped.append(query)
+        seen.add(normalized)
+        if len(capped) >= max_queries:
+            break
+    return capped
+
+
 # ---------------------------------------------------------------------------
 # Stage executors
 # ---------------------------------------------------------------------------
@@ -354,18 +375,23 @@ def _execute_literature_collect(
         )
 
         # Expand queries for broader coverage
-        expanded_queries = _expand_search_queries(queries, config.research.topic)
+        expanded_queries = _cap_search_queries(
+            _expand_search_queries(queries, config.research.topic)
+        )
+        limit_per_query = _literature_limit_per_query(config)
         logger.info(
-            "[literature] Searching %d queries (expanded from %d) "
-            "across OpenAlex → S2 → arXiv…",
+            "[literature] Searching %d queries (expanded from %d), "
+            "limit=%d across OpenAlex → S2 → arXiv…",
             len(expanded_queries),
             len(queries),
+            limit_per_query,
         )
         papers = search_papers_multi_query(
             expanded_queries,
-            limit_per_query=40,
+            limit_per_query=limit_per_query,
             year_min=year_min,
             s2_api_key=config.llm.s2_api_key,
+            inter_query_delay=3.2,
         )
         if papers:
             real_search_succeeded = True

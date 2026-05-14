@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -196,6 +197,7 @@ class LlmConfig:
     primary_model: str = ""
     fallback_models: tuple[str, ...] = ()
     s2_api_key: str = ""
+    s2_api_key_env: str = "SEMANTIC_SCHOLAR_API_KEY"
     notes: str = ""
     timeout_sec: int = 600
     acp: AcpConfig = field(default_factory=AcpConfig)
@@ -961,6 +963,12 @@ def validate_config(
 
 def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
     acp_data = data.get("acp") or {}
+    s2_api_key_env = str(data.get("s2_api_key_env", "SEMANTIC_SCHOLAR_API_KEY"))
+    s2_api_key = str(data.get("s2_api_key", ""))
+    if not s2_api_key:
+        s2_api_key = os.environ.get(s2_api_key_env, "") or os.environ.get(
+            "S2_API_KEY", ""
+        )
     return LlmConfig(
         provider=data.get("provider", "openai-compatible"),
         base_url=data.get("base_url", ""),
@@ -969,7 +977,8 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
         api_key=data.get("api_key", ""),
         primary_model=data.get("primary_model", ""),
         fallback_models=tuple(data.get("fallback_models") or ()),
-        s2_api_key=data.get("s2_api_key", ""),
+        s2_api_key=s2_api_key,
+        s2_api_key_env=s2_api_key_env,
         notes=data.get("notes", ""),
         timeout_sec=_safe_int(data.get("timeout_sec"), 600),
         acp=AcpConfig(
