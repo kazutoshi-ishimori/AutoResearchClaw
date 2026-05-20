@@ -827,6 +827,23 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_compare(args: argparse.Namespace) -> int:
+    from researchclaw.model_compare import write_model_comparison
+
+    run_dirs = [Path(p) for p in cast(list[str], args.runs)]
+    output = Path(cast(str, args.output))
+
+    try:
+        written = write_model_comparison(run_dirs, output)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Model comparison written to {written['markdown']}")
+    print(f"JSON written to {written['json']}")
+    return 0
+
+
 # ── Research Enhancement commands (Agent D) ───────────────────────
 
 
@@ -1089,6 +1106,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     _ = rpt_p.add_argument("--output", "-o", help="Write report to file")
 
+    cmp_p = sub.add_parser(
+        "model-compare",
+        help="Compare multiple ARC model run artifact directories",
+    )
+    _ = cmp_p.add_argument(
+        "--runs",
+        nargs="+",
+        required=True,
+        help="Run artifact directories to compare",
+    )
+    _ = cmp_p.add_argument(
+        "--output",
+        "-o",
+        default="artifacts/model-comparison",
+        help="Directory for model_comparison.json and model_comparison.md",
+    )
+
     # A: Web platform
     srv_p = sub.add_parser("serve", help="Start the web server")
     _ = srv_p.add_argument("--config", "-c", default="config.yaml", help="Config file path")
@@ -1198,6 +1232,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args)
     elif command == "report":
         return cmd_report(args)
+    elif command == "model-compare":
+        return cmd_model_compare(args)
     elif command == "serve":
         return cmd_serve(args)
     elif command == "dashboard":
