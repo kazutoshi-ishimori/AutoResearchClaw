@@ -12,6 +12,7 @@ from researchclaw.experiment.validator import (
     check_filename_collisions,
     extract_imports,
     format_issues_for_llm,
+    check_variable_scoping,
     validate_code,
     validate_imports,
     validate_security,
@@ -46,6 +47,73 @@ def test_validate_syntax_reports_syntax_error_with_location():
     assert issue.line == 1
     assert issue.col is not None
     assert issue.message
+
+
+def test_check_variable_scoping_allows_use_inside_same_if_branch():
+    code = """
+def fit(flag):
+    if flag:
+        residuals = 1
+        print(residuals)
+    else:
+        other = 2
+        print(other)
+"""
+
+    assert check_variable_scoping(code, "model.py") == []
+
+
+def test_check_variable_scoping_allows_assignment_in_all_branches():
+    code = """
+def fit(flag):
+    if flag:
+        residuals = 1
+    else:
+        residuals = 2
+    return residuals
+"""
+
+    assert check_variable_scoping(code, "model.py") == []
+
+
+def test_check_variable_scoping_flags_use_after_conditional_assignment():
+    code = """
+def fit(flag):
+    if flag:
+        residuals = 1
+    return residuals
+"""
+
+    warnings = check_variable_scoping(code, "model.py")
+    assert len(warnings) == 1
+    assert "UnboundLocalError" in warnings[0]
+
+
+def test_check_variable_scoping_recognizes_tuple_assignment_before_if():
+    code = """
+def calibrate(scores):
+    score_min, score_max = min(scores), max(scores)
+    if score_max - score_min < 1e-10:
+        score_max = score_min + 1e-6
+    return score_max
+"""
+
+    assert check_variable_scoping(code, "model.py") == []
+
+
+def test_check_variable_scoping_allows_if_elif_assignments_with_raising_else():
+    code = """
+def apply_shift(kind, x):
+    if kind == "a":
+        shifted = x + 1
+    elif kind == "b":
+        shifted = x + 2
+    else:
+        raise ValueError(kind)
+    return shifted
+"""
+
+    assert check_variable_scoping(code, "data.py") == []
 
 
 @pytest.mark.parametrize("code", ["", "   \n\t  ", "# comment only\n# still comment"])

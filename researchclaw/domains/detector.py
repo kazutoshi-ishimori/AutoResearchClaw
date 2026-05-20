@@ -292,12 +292,47 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
 ]
 
 
+_HIGH_CONFIDENCE_SINGLE_CELL_KEYWORDS = (
+    "fly cell atlas",
+    "single-cell",
+    "single cell",
+    "scrna",
+    "scrna-seq",
+    "h5ad",
+    "anndata",
+    "scanpy",
+    "scvi",
+)
+
+_PREFIX_KEYWORDS = {
+    # Preserve the historical stemmed intent without allowing every short
+    # keyword to match inside unrelated words such as "visualization".
+    "tokeniz",
+}
+
+
+def _keyword_matches(text: str, keyword: str) -> bool:
+    """Return whether ``keyword`` appears as a term, not a substring."""
+    kw = keyword.lower()
+    if kw in _PREFIX_KEYWORDS:
+        return re.search(rf"(?<![a-z0-9]){re.escape(kw)}", text) is not None
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])",
+        text,
+    ) is not None
+
+
 def _keyword_detect(text: str) -> str | None:
     """Match text against keyword rules. Returns domain_id or None."""
     lower = text.lower()
+    if any(
+        _keyword_matches(lower, kw)
+        for kw in _HIGH_CONFIDENCE_SINGLE_CELL_KEYWORDS
+    ):
+        return "biology_singlecell"
     for keywords, domain_id in _KEYWORD_RULES:
         for kw in keywords:
-            if kw in lower:
+            if _keyword_matches(lower, kw):
                 return domain_id
     return None
 

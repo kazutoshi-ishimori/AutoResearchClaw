@@ -32,6 +32,20 @@ class _DummyHTTPResponse:
         return None
 
 
+class _RawHTTPResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> _RawHTTPResponse:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+
 def _make_client(
     *,
     api_key: str = "test-key",
@@ -180,6 +194,46 @@ def test_parse_response_with_valid_payload_via_raw_call(
     assert parsed.model == "gpt-5.2"
     assert parsed.prompt_tokens == 1
     assert parsed.total_tokens == 3
+
+
+def test_call_with_retry_retries_malformed_api_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    responses = [
+        b'{"choices": [\n',
+        json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8"),
+    ]
+    calls = 0
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _RawHTTPResponse:
+        nonlocal calls
+        _ = (req, timeout)
+        payload = responses[calls]
+        calls += 1
+        return _RawHTTPResponse(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("researchclaw.llm.client.time.sleep", lambda _: None)
+    config = LLMConfig(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        primary_model="qwen/qwen3.6-27b",
+        fallback_models=[],
+        max_retries=2,
+        retry_base_delay=0,
+    )
+    client = LLMClient(config)
+
+    resp = client._call_with_retry(
+        "qwen/qwen3.6-27b",
+        [{"role": "user", "content": "hello"}],
+        100,
+        0.1,
+        True,
+    )
+
+    assert calls == 2
+    assert resp.content == "ok"
 
 
 def test_parse_response_truncated_when_finish_reason_length(

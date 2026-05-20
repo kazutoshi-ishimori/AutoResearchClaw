@@ -315,6 +315,8 @@ class CodeAgentConfig:
     tree_search_eval_timeout_sec: int = 120
     # Phase 5: Multi-agent review dialog
     review_max_rounds: int = 2
+    # Per LLM call timeout for providers that can hang during streamed reads.
+    llm_call_timeout_sec: float = 300
 
 
 @dataclass(frozen=True)
@@ -1172,6 +1174,7 @@ def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
             data.get("tree_search_eval_timeout_sec"), 120
         ),
         review_max_rounds=_safe_int(data.get("review_max_rounds"), 2),
+        llm_call_timeout_sec=_safe_float(data.get("llm_call_timeout_sec"), 300),
     )
 
 

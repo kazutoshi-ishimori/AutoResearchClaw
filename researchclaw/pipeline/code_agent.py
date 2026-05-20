@@ -25,7 +25,11 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import queue
 import re
+import signal
+import shutil
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +78,9 @@ class CodeAgentConfig:
 
     # Phase 5: Multi-agent review dialog
     review_max_rounds: int = 2
+
+    # Per-call guard for provider reads that can hang even with socket timeouts.
+    llm_call_timeout_sec: float = 300
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +237,7 @@ class CodeAgent:
                     files, topic, exp_plan, metric, pkg_hint, arch_spec,
                 )
             # Exec-fix loop
-            files = self._exec_fix_loop(files)
+            files = self._exec_fix_loop(files, metric)
             best = SolutionNode(
                 node_id="sequential", files=files, runs_ok=True, score=1.0,
             )
@@ -307,11 +314,10 @@ class CodeAgent:
 
         resp = self._chat(sp.system, sp.user, max_tokens=8192)
 
-        # Extract YAML block from response
-        arch_spec = resp.content
-        yaml_match = re.search(r"```ya?ml\s*\n(.*?)```", arch_spec, re.DOTALL)
-        if yaml_match:
-            arch_spec = yaml_match.group(1).strip()
+        # Extract YAML block from response. Some providers truncate long
+        # blueprint replies after the opening ```yaml fence, so accept
+        # both closed and unclosed fenced blocks.
+        arch_spec = self._strip_yaml_code_fence(resp.content)
 
         self._log_event(f"  Blueprint spec: {len(arch_spec)} chars")
 
@@ -363,6 +369,22 @@ class CodeAgent:
 
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _strip_yaml_code_fence(text: str) -> str:
+        stripped = text.strip()
+        fence = re.search(
+            r"```[ \t]*(?:ya?ml)?[ \t]*\r?\n",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not fence:
+            return stripped
+        start = fence.end()
+        end = stripped.find("```", start)
+        if end < 0:
+            return stripped[start:].strip()
+        return stripped[start:end].strip()
+
     def _parse_blueprint(self, yaml_text: str) -> dict[str, Any] | None:
         """Parse blueprint YAML into a structured dict.
 
@@ -372,6 +394,8 @@ class CodeAgent:
         values before parsing.
         """
         import yaml
+
+        yaml_text = self._strip_yaml_code_fence(yaml_text)
 
         # Pre-process: sanitize values that contain Python type annotations,
         # unclosed quotes, or other patterns that break YAML parsing.
@@ -957,9 +981,9 @@ class CodeAgent:
             self._log_event("  WARNING: empty generation, returning fallback")
             return files
 
-        return self._exec_fix_loop(files)
+        return self._exec_fix_loop(files, metric)
 
-    def _exec_fix_loop(self, files: dict[str, str]) -> dict[str, str]:
+    def _exec_fix_loop(self, files: dict[str, str], metric: str) -> dict[str, str]:
         """Run exec-fix loop if sandbox is available."""
         if not self._sandbox_factory or self._cfg.exec_fix_max_iterations <= 0:
             return files
@@ -967,8 +991,23 @@ class CodeAgent:
         for i in range(self._cfg.exec_fix_max_iterations):
             result = self._run_in_sandbox(files)
             if result.returncode == 0:
-                self._log_event(f"  Exec-fix iter {i}: code runs OK")
-                break
+                if self._result_has_metrics(result, metric):
+                    self._log_event(f"  Exec-fix iter {i}: code runs OK")
+                    break
+                self._log_event(
+                    f"  Exec-fix iter {i}: exited 0 but emitted no metrics; "
+                    "requesting repair"
+                )
+                result = _SimpleResult(
+                    returncode=1,
+                    stdout=result.stdout or "",
+                    stderr=(
+                        "Experiment exited with return code 0 but emitted no "
+                        f"metrics. The entry point must print '{metric}: "
+                        "<float>' or otherwise report non-empty metrics."
+                    ),
+                    metrics=dict(getattr(result, "metrics", {}) or {}),
+                )
 
             self._log_event(
                 f"  Exec-fix iter {i}: crashed (rc={result.returncode}), "
@@ -977,6 +1016,21 @@ class CodeAgent:
             files = self._fix_runtime_error(files, result)
 
         return files
+
+    @staticmethod
+    def _result_has_metrics(result: Any, metric: str) -> bool:
+        metrics = getattr(result, "metrics", None)
+        if isinstance(metrics, dict) and metrics:
+            return True
+        stdout = str(getattr(result, "stdout", "") or "")
+        if not stdout.strip():
+            return False
+        metric_pattern = rf"(?m)^\s*{re.escape(metric)}\s*:\s*[-+0-9.eE]+"
+        any_metric_pattern = r"(?m)^\s*[A-Za-z_][\w .()/+-]*\s*:\s*[-+0-9.eE]+"
+        return (
+            re.search(metric_pattern, stdout) is not None
+            or re.search(any_metric_pattern, stdout) is not None
+        )
 
     def _generate_code(
         self,
@@ -1382,11 +1436,63 @@ class CodeAgent:
         """Make an LLM call and track count."""
         self._calls += 1
         messages = [{"role": "user", "content": user}]
-        return self._llm.chat(
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
-        )
+        timeout = float(self._cfg.llm_call_timeout_sec or 0)
+        if timeout <= 0:
+            return self._llm.chat(
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+            )
+
+        if threading.current_thread() is threading.main_thread():
+            old_handler = signal.getsignal(signal.SIGALRM)
+            old_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+            def _handle_timeout(signum: int, frame: Any) -> None:
+                _ = signum, frame
+                raise TimeoutError(
+                    f"CodeAgent LLM call timed out after {timeout:g}s"
+                )
+
+            signal.signal(signal.SIGALRM, _handle_timeout)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            try:
+                return self._llm.chat(
+                    messages=messages,
+                    system=system,
+                    max_tokens=max_tokens,
+                )
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old_handler)
+                if old_timer[0] > 0:
+                    signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+
+        result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def _call_llm() -> None:
+            try:
+                resp = self._llm.chat(
+                    messages=messages,
+                    system=system,
+                    max_tokens=max_tokens,
+                )
+                result_queue.put((True, resp))
+            except BaseException as exc:  # noqa: BLE001
+                result_queue.put((False, exc))
+
+        thread = threading.Thread(target=_call_llm, daemon=True)
+        thread.start()
+        try:
+            ok, value = result_queue.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError(
+                f"CodeAgent LLM call timed out after {timeout:g}s"
+            ) from exc
+
+        if ok:
+            return value
+        raise value
 
     def _get_or_create_sandbox(self) -> _SandboxLike:
         """Lazily create a single sandbox instance for all validation runs."""
@@ -1412,6 +1518,8 @@ class CodeAgent:
 
         # Write files to a numbered attempt directory
         run_dir = self._stage_dir / "agent_runs" / f"attempt_{self._runs:03d}"
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         for fname, code in files.items():
             fpath = (run_dir / fname).resolve()

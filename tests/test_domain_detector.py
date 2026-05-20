@@ -123,6 +123,23 @@ class TestKeywordDetection:
     def test_biology_keywords(self):
         assert _keyword_detect("single-cell RNA-seq analysis with scanpy") == "biology_singlecell"
 
+    def test_single_cell_markers_outweigh_generic_visualization_and_simulation(self):
+        assert (
+            _keyword_detect(
+                "Fly Cell Atlas single-cell RNA-seq analysis with downstream "
+                "simulation checks and visualization"
+            )
+            == "biology_singlecell"
+        )
+
+    def test_visualization_does_not_force_physics_topic_to_vision(self):
+        assert (
+            _keyword_detect(
+                "molecular dynamics visualization of a Lennard-Jones fluid simulation"
+            )
+            == "physics_simulation"
+        )
+
     def test_economics_keywords(self):
         assert _keyword_detect("panel data regression with fixed effects") == "economics_empirical"
         assert _keyword_detect("instrumental variable causal inference") == "economics_empirical"

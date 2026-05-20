@@ -34,6 +34,21 @@ from researchclaw.pipeline._helpers import (
     _utcnow_iso,
     reconcile_figure_refs,
 )
+from researchclaw.pipeline.paper_contract import (
+    find_paper_contract_violations,
+    load_paper_contract,
+    repair_paper_contract_violations,
+    render_paper_contract_instruction,
+    sanitize_paper_contract_violations,
+)
+from researchclaw.pipeline.paper_integrity import (
+    enforce_revision_integrity,
+    extract_bibtex_keys,
+    extract_citation_keys,
+    filter_contract_figures,
+    render_revision_integrity_instruction,
+    section_integrity_warnings,
+)
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
@@ -293,6 +308,17 @@ def _execute_paper_revision(
             "you do not have, state 'Due to computational constraints, "
             "this analysis was not conducted' instead of fabricating data.\n"
         )
+    _contract_instruction = render_paper_contract_instruction(
+        load_paper_contract(run_dir)
+    )
+    if _contract_instruction:
+        data_integrity_revision += _contract_instruction
+    _allowed_revision_citations = extract_bibtex_keys(
+        _read_prior_references_bib(run_dir, current_stage_dir=stage_dir) or ""
+    ) | extract_citation_keys(draft)
+    data_integrity_revision += render_revision_integrity_instruction(
+        _allowed_revision_citations
+    )
 
     if llm is not None:
         _pm = prompts or PromptManager()
@@ -413,12 +439,45 @@ def _execute_paper_revision(
                 revised = draft
     else:
         revised = draft
+    artifacts = ["paper_revised.md"]
+    evidence_refs = ["stage-19/paper_revised.md"]
+    _paper_contract = load_paper_contract(run_dir)
+    if llm is not None and _paper_contract:
+        revised, _contract_repair = repair_paper_contract_violations(
+            revised,
+            _paper_contract,
+            llm=llm,
+            stage_label="Stage 19 PAPER_REVISION",
+        )
+        if _contract_repair.get("initial_violation_count", 0) > 0:
+            (stage_dir / "revision_contract_repair.json").write_text(
+                json.dumps(_contract_repair, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifacts.append("revision_contract_repair.json")
+            evidence_refs.append("stage-19/revision_contract_repair.json")
+    revised, _integrity_report = enforce_revision_integrity(
+        draft=draft,
+        revised=revised,
+        allowed_citation_keys=_allowed_revision_citations,
+    )
+    if (
+        _integrity_report.get("removed_citation_keys")
+        or _integrity_report.get("fallback_to_draft")
+        or _integrity_report.get("too_short")
+    ):
+        (stage_dir / "revision_integrity_report.json").write_text(
+            json.dumps(_integrity_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifacts.append("revision_integrity_report.json")
+        evidence_refs.append("stage-19/revision_integrity_report.json")
     (stage_dir / "paper_revised.md").write_text(revised, encoding="utf-8")
     return StageResult(
         stage=Stage.PAPER_REVISION,
         status=StageStatus.DONE,
-        artifacts=("paper_revised.md",),
-        evidence_refs=("stage-19/paper_revised.md",),
+        artifacts=tuple(artifacts),
+        evidence_refs=tuple(evidence_refs),
     )
 
 
@@ -1209,6 +1268,50 @@ def _sanitize_fabricated_data(
     return sanitized, report
 
 
+def _read_prior_references_bib(
+    run_dir: Path,
+    *,
+    current_stage_dir: Path,
+) -> str | None:
+    """Read the newest non-empty upstream ``references.bib``.
+
+    Stage 22 is often rerun after a failed export.  In that case its own stale
+    ``references.bib`` may be empty, and treating it as a prior artifact drops
+    all citations.  For citation export we only want upstream bibliography
+    evidence, and only if it still contains BibTeX entries.
+    """
+
+    def _stage_sort_key(p: Path) -> tuple[str, int]:
+        name = p.name
+        if "_v" in name:
+            base, _, ver = name.rpartition("_v")
+            try:
+                return (base, -int(ver))
+            except ValueError:
+                return (name, -999)
+        return (name, 0)
+
+    current_stage_dir = current_stage_dir.resolve()
+    for stage_subdir in sorted(
+        run_dir.glob("stage-*"),
+        key=_stage_sort_key,
+        reverse=True,
+    ):
+        if stage_subdir.resolve() == current_stage_dir:
+            continue
+        candidate = stage_subdir / "references.bib"
+        if not candidate.is_file():
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as exc:
+            logger.warning("Cannot read %s: %s — skipping", candidate, exc)
+            continue
+        if re.search(r"@\w+\s*\{", text):
+            return text
+    return None
+
+
 # ---------------------------------------------------------------------------
 # BUG-176: Missing citation resolution
 # BUG-194: Validate search results to avoid replacing correct entries with
@@ -1500,6 +1603,14 @@ def _execute_export_publish(
         final_paper = revised
     if not final_paper.strip():
         final_paper = "# Final Paper\n\nNo content generated."
+    _paper_contract = load_paper_contract(run_dir)
+    _paper_integrity_report: dict[str, Any] = {
+        "stage": "export_publish",
+        "generated": _utcnow_iso(),
+        "removed_citation_keys": [],
+        "skipped_figure_paths": [],
+        "warnings": [],
+    }
 
     # --- Always-on fabrication sanitization (Phase 1 anti-fabrication) ---
     # Back up pre-sanitized version
@@ -1606,6 +1717,13 @@ def _execute_export_publish(
     for _chart_src_dir in _chart_search_dirs:
         if _chart_src_dir.is_dir():
             chart_files.extend(sorted(_chart_src_dir.glob("*.png")))
+    if _paper_contract:
+        chart_files, _skipped_figures = filter_contract_figures(
+            chart_files,
+            _paper_contract,
+        )
+        if _skipped_figures:
+            _paper_integrity_report["skipped_figure_paths"] = _skipped_figures
     # BUG-190: Also inject charts not already referenced in the paper.
     # The old condition only fired when NO figures were present. Now we
     # filter to only unreferenced charts, so partially-illustrated papers
@@ -1700,11 +1818,84 @@ def _execute_export_publish(
             "IMP-24: Numbers repeated >3 times: %s",
             _repeated,
         )
+        _paper_integrity_report["repeated_numbers"] = _repeated
 
     # --- Semantic Scholar attribution (required by S2 API terms) ---
     final_paper = _ensure_s2_attribution(final_paper)
 
+    _contract_violations = find_paper_contract_violations(final_paper, _paper_contract)
+    _contract_sanitization = None
+    if _contract_violations:
+        final_paper, _contract_sanitization = sanitize_paper_contract_violations(
+            final_paper,
+            _paper_contract,
+        )
+        _contract_violations = find_paper_contract_violations(
+            final_paper,
+            _paper_contract,
+        )
+        (stage_dir / "paper_contract_sanitization.json").write_text(
+            json.dumps(
+                {
+                    "passed": not _contract_violations,
+                    "initial_violation_count": len(
+                        _contract_sanitization.get("replacements", [])
+                    ),
+                    "remaining_violation_count": len(_contract_violations),
+                    "remaining_violations": _contract_violations,
+                    **_contract_sanitization,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
     (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
+
+    if _contract_violations:
+        _paper_integrity_report["warnings"] = section_integrity_warnings(final_paper)
+        (stage_dir / "paper_integrity_report.json").write_text(
+            json.dumps(_paper_integrity_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (stage_dir / "paper_contract_violations.json").write_text(
+            json.dumps(
+                {
+                    "passed": False,
+                    "violation_count": len(_contract_violations),
+                    "violations": _contract_violations,
+                    "generated": _utcnow_iso(),
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        logger.error(
+            "Stage 22: Paper contract violation(s): %s",
+            "; ".join(_contract_violations[:3]),
+        )
+        return StageResult(
+            stage=Stage.EXPORT_PUBLISH,
+            status=StageStatus.FAILED,
+            artifacts=(
+                "paper_final.md",
+                "paper_integrity_report.json",
+                "paper_contract_violations.json",
+            ),
+            evidence_refs=(
+                "stage-22/paper_final.md",
+                "stage-22/paper_integrity_report.json",
+                "stage-22/paper_contract_violations.json",
+            ),
+            error=(
+                "Paper contract violations before LaTeX export: "
+                + "; ".join(_contract_violations[:3])
+            ),
+        )
+    else:
+        (stage_dir / "paper_contract_violations.json").unlink(missing_ok=True)
 
     # --- Legacy fabrication sanitization (disabled — superseded by Phase 1 _sanitize_fabricated_data above) ---
     # Kept but guarded: Phase 1 always-on sanitization handles this now.
@@ -1790,13 +1981,45 @@ def _execute_export_publish(
     # and copy final references.bib to export stage
     _ay_map: dict[str, str] = {}  # BUG-102: author-year → cite_key map
     final_paper_latex = final_paper  # default when no bib_text available
-    bib_text = _read_prior_artifact(run_dir, "references.bib")
+    bib_text = _read_prior_references_bib(run_dir, current_stage_dir=stage_dir)
     if bib_text:
         # Replace [cite_key] patterns in the final paper with \cite{cite_key}
         # Collect all valid cite_keys from the bib file
         import re as _re
 
         valid_keys = set(_re.findall(r"@\w+\{([^,]+),", bib_text))
+
+        # Some local/cloud LLMs emit placeholders like [cite_smith2024paper]
+        # while the BibTeX key is smith2024paper.  Normalize these before
+        # validation/conversion so reruns do not prune all references.
+        if valid_keys:
+            _CITE_TOKEN_PAT = r"[a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z0-9_-]*"
+
+            def _normalize_cite_prefixes(m: _re.Match[str]) -> str:
+                inner = m.group(1)
+                parts = _re.split(r"([,;]\s*)", inner)
+                changed = False
+                normalized_parts: list[str] = []
+                for part in parts:
+                    stripped = part.strip()
+                    if (
+                        stripped.startswith("cite_")
+                        and stripped[5:] in valid_keys
+                        and _re.fullmatch(_CITE_TOKEN_PAT, stripped)
+                    ):
+                        normalized_parts.append(part.replace(stripped, stripped[5:]))
+                        changed = True
+                    else:
+                        normalized_parts.append(part)
+                if not changed:
+                    return m.group(0)
+                return "[" + "".join(normalized_parts) + "]"
+
+            final_paper = _re.sub(
+                rf"\[([^\]]*\b{_CITE_TOKEN_PAT}\b[^\]]*)\]",
+                _normalize_cite_prefixes,
+                final_paper,
+            )
 
         # BUG-102: Recover author-year citations → [cite_key] format.
         # When Stage 19 (paper_revision) converts [cite_key] to [Author et al., 2024],
@@ -1938,12 +2161,18 @@ def _execute_export_publish(
                     len(invalid_keys),
                     ", ".join(sorted(invalid_keys)[:20]),
                 )
-                # BUG-176: Try to resolve missing citations before removing them.
-                # Parse cite_key → search query, look up via academic APIs,
-                # and add found entries to references.bib.
                 resolved_keys: set[str] = set()
                 new_bib_entries: list[str] = []
-                if len(invalid_keys) <= 30:  # Sanity: don't flood APIs
+                if _paper_contract:
+                    logger.warning(
+                        "Stage 22: Paper contract is active; removing new "
+                        "citation keys instead of synthesizing bibliography entries."
+                    )
+                # BUG-176: Try to resolve missing citations before removing them.
+                # Contracted paper exports intentionally skip this path: after
+                # Stage 16 the bibliography is part of the paper evidence
+                # boundary and must not be expanded by Stage 22.
+                elif len(invalid_keys) <= 30:  # Sanity: don't flood APIs
                     resolved_keys, new_bib_entries = _resolve_missing_citations(
                         invalid_keys, bib_text
                     )
@@ -1957,6 +2186,10 @@ def _execute_export_publish(
 
                 still_invalid = invalid_keys - resolved_keys
                 if still_invalid:
+                    _paper_integrity_report["removed_citation_keys"] = sorted(
+                        set(_paper_integrity_report["removed_citation_keys"])
+                        | still_invalid
+                    )
                     # IMP-29: Remove remaining unresolvable citations from
                     # BOTH single-key and multi-key brackets.
                     import re as _re_imp29
@@ -2070,6 +2303,13 @@ def _execute_export_publish(
             len(valid_keys) if valid_keys else 0,
         )
 
+    _paper_integrity_report["warnings"] = section_integrity_warnings(final_paper)
+    (stage_dir / "paper_integrity_report.json").write_text(
+        json.dumps(_paper_integrity_report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    artifacts.append("paper_integrity_report.json")
+
     # Conference template: generate .tex file
     _latex_compile_ok = False
     _latex_errors: list[str] = []
@@ -2141,6 +2381,22 @@ def _execute_export_publish(
                         "config_warnings": getattr(_vresult, "config_warnings", []),
                         "summary": _vresult.summary,
                     }, indent=2),
+                    encoding="utf-8",
+                )
+                _paper_integrity_report["unverified_number_count"] = len(
+                    _vresult.unverified_numbers
+                )
+                if _vresult.unverified_numbers:
+                    _paper_integrity_report["warnings"].append(
+                        "unverified_numbers:"
+                        f"{len(_vresult.unverified_numbers)}"
+                    )
+                (stage_dir / "paper_integrity_report.json").write_text(
+                    json.dumps(
+                        _paper_integrity_report,
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
                     encoding="utf-8",
                 )
                 logger.info(
@@ -2384,14 +2640,30 @@ def _execute_export_publish(
                         encoding="utf-8",
                     )
                     artifacts.append("compilation_quality.json")
+                    _paper_integrity_report["page_count"] = _qc.page_count
+                    if _qc.warnings_summary:
+                        _paper_integrity_report["warnings"].extend(
+                            _qc.warnings_summary
+                        )
                     # BUG-27: Warn if page count exceeds limit
                     _page_limit = 10
                     if _qc.page_count and _qc.page_count > _page_limit:
+                        _paper_integrity_report["warnings"].append(
+                            f"page_count_exceeds_limit:{_qc.page_count}>{_page_limit}"
+                        )
                         logger.warning(
                             "BUG-27: Paper is %d pages (limit %d). "
                             "Consider tightening content in revision.",
                             _qc.page_count, _page_limit,
                         )
+                    (stage_dir / "paper_integrity_report.json").write_text(
+                        json.dumps(
+                            _paper_integrity_report,
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
                 except Exception as _qc_exc:  # noqa: BLE001
                     logger.debug("Stage 22: Quality checks skipped: %s", _qc_exc)
             else:

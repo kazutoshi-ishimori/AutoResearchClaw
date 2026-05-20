@@ -739,39 +739,31 @@ def check_variable_scoping(code: str, fname: str = "main.py") -> list[str]:
     except SyntaxError:
         return warnings
 
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
 
-        # Collect variables assigned only inside if/elif/else branches
-        if_only_vars: dict[str, int] = {}
-        top_level_vars: set[str] = set()
-
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.If):
-                _collect_if_only_assignments(child, if_only_vars)
-            elif isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-                for target in _extract_assign_targets(child):
-                    top_level_vars.add(target)
-
-        # Check for variables used after the if block but only defined inside it
-        for var_name, var_line in if_only_vars.items():
-            if var_name not in top_level_vars:
-                # Check if this variable is used later in the function
-                for later_node in ast.walk(node):
-                    if (
-                        isinstance(later_node, ast.Name)
-                        and later_node.id == var_name
-                        and isinstance(later_node.ctx, ast.Load)
-                        and later_node.lineno > var_line
-                    ):
+        assigned_before: set[str] = set()
+        body = list(func.body)
+        for idx, stmt in enumerate(body):
+            if isinstance(stmt, ast.If):
+                conditional_assigns: dict[str, int] = {}
+                _collect_if_only_assignments(stmt, conditional_assigns)
+                definitely_assigned = _assigned_in_every_if_branch(stmt)
+                later_body = body[idx + 1 :]
+                for var_name, var_line in conditional_assigns.items():
+                    if var_name in assigned_before or var_name in definitely_assigned:
+                        continue
+                    use_line = _first_load_before_assignment(later_body, var_name)
+                    if use_line is not None:
                         warnings.append(
                             f"[{fname}:{var_line}] Variable '{var_name}' is assigned "
                             f"only inside an if-branch but used at line "
-                            f"{later_node.lineno} — will cause UnboundLocalError "
+                            f"{use_line} — will cause UnboundLocalError "
                             f"if the branch is not taken"
                         )
-                        break
+            for target in _extract_assign_targets(stmt):
+                assigned_before.add(target)
 
     return warnings
 
@@ -788,19 +780,74 @@ def _collect_if_only_assignments(
             _collect_if_only_assignments(child, result)
 
 
+def _assigned_names_in_nodes(nodes: list[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for node in nodes:
+        for child in ast.walk(node):
+            if isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                names.update(_extract_assign_targets(child))
+    return names
+
+
+def _assigned_in_every_if_branch(if_node: ast.If) -> set[str]:
+    """Return names assigned regardless of which branch executes."""
+    body_names = _assigned_names_in_nodes(list(if_node.body))
+    if not if_node.orelse:
+        return set()
+    if len(if_node.orelse) == 1 and isinstance(if_node.orelse[0], ast.If):
+        else_names = _assigned_in_every_if_branch(if_node.orelse[0])
+    elif _branch_terminates(list(if_node.orelse)):
+        else_names = body_names
+    else:
+        else_names = _assigned_names_in_nodes(list(if_node.orelse))
+    return body_names & else_names
+
+
+def _branch_terminates(nodes: list[ast.stmt]) -> bool:
+    """True when the branch cannot fall through to later statements."""
+    if not nodes:
+        return False
+    return isinstance(nodes[-1], (ast.Raise, ast.Return))
+
+
+def _first_load_before_assignment(
+    nodes: list[ast.stmt], var_name: str
+) -> int | None:
+    """Find a later top-level use before a later unconditional assignment."""
+    for node in nodes:
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Name)
+                and child.id == var_name
+                and isinstance(child.ctx, ast.Load)
+            ):
+                return child.lineno
+        if var_name in _extract_assign_targets(node):
+            return None
+    return None
+
+
 def _extract_assign_targets(node: ast.AST) -> list[str]:
     """Extract variable names from assignment targets."""
     names: list[str] = []
+
+    def _target_names(target: ast.AST) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            extracted: list[str] = []
+            for elt in target.elts:
+                extracted.extend(_target_names(elt))
+            return extracted
+        return []
+
     if isinstance(node, ast.Assign):
         for target in node.targets:
-            if isinstance(target, ast.Name):
-                names.append(target.id)
+            names.extend(_target_names(target))
     elif isinstance(node, ast.AugAssign):
-        if isinstance(node.target, ast.Name):
-            names.append(node.target.id)
+        names.extend(_target_names(node.target))
     elif isinstance(node, ast.AnnAssign):
-        if isinstance(node.target, ast.Name):
-            names.append(node.target.id)
+        names.extend(_target_names(node.target))
     return names
 
 

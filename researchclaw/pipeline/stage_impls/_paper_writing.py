@@ -31,6 +31,12 @@ from researchclaw.pipeline._helpers import (
     _topic_constraint_block,
     _utcnow_iso,
 )
+from researchclaw.pipeline.paper_contract import (
+    load_paper_contract,
+    repair_paper_contract_violations,
+    render_paper_contract_instruction,
+    write_paper_contract,
+)
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
@@ -62,6 +68,19 @@ def _execute_paper_outline(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    artifacts = ["outline.md"]
+    evidence_refs = ["stage-16/outline.md"]
+    try:
+        write_paper_contract(
+            stage_dir,
+            run_dir,
+            metric_direction=config.experiment.metric_direction,
+        )
+        artifacts.append("paper_contract.json")
+        evidence_refs.append("stage-16/paper_contract.json")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Stage 16: paper contract generation skipped: %s", exc)
+
     analysis = _read_best_analysis(run_dir)
     decision = _read_prior_artifact(run_dir, "decision.md") or ""
     preamble = _build_context_preamble(
@@ -137,8 +156,8 @@ def _execute_paper_outline(
     return StageResult(
         stage=Stage.PAPER_OUTLINE,
         status=StageStatus.DONE,
-        artifacts=("outline.md",),
-        evidence_refs=("stage-16/outline.md",),
+        artifacts=tuple(artifacts),
+        evidence_refs=tuple(evidence_refs),
     )
 
 
@@ -1286,6 +1305,20 @@ def _execute_paper_draft(
     exp_metrics_instruction = ""
     has_real_metrics = False
     _verified_registry = None  # Phase 1: anti-fabrication verified data registry
+    _paper_contract = load_paper_contract(run_dir)
+    if not _paper_contract:
+        try:
+            _paper_contract = write_paper_contract(
+                stage_dir,
+                run_dir,
+                metric_direction=config.experiment.metric_direction,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Stage 17: paper contract generation skipped: %s", exc)
+            _paper_contract = {}
+    _contract_instruction = render_paper_contract_instruction(_paper_contract)
+    if _contract_instruction:
+        exp_metrics_instruction += _contract_instruction
     # BUG-108: Load refinement_log so VerifiedRegistry has per-iteration metrics
     _refinement_log_for_vr: dict | None = None
     _rl_candidates = sorted(run_dir.glob("stage-13*/refinement_log.json"), reverse=True)
@@ -2070,6 +2103,23 @@ Template references.
 
 Generated: {_utcnow_iso()}
 """
+
+    artifacts = ["paper_draft.md"]
+    evidence_refs = ["stage-17/paper_draft.md"]
+    if llm is not None and _paper_contract:
+        draft, _contract_repair = repair_paper_contract_violations(
+            draft,
+            _paper_contract,
+            llm=llm,
+            stage_label="Stage 17 PAPER_DRAFT",
+        )
+        if _contract_repair.get("initial_violation_count", 0) > 0:
+            (stage_dir / "draft_contract_repair.json").write_text(
+                json.dumps(_contract_repair, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifacts.append("draft_contract_repair.json")
+            evidence_refs.append("stage-17/draft_contract_repair.json")
     (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
 
     # Validate draft quality (section balance + bullet density)
@@ -2124,6 +2174,6 @@ Generated: {_utcnow_iso()}
     return StageResult(
         stage=Stage.PAPER_DRAFT,
         status=StageStatus.DONE,
-        artifacts=("paper_draft.md",),
-        evidence_refs=("stage-17/paper_draft.md",),
+        artifacts=tuple(artifacts),
+        evidence_refs=tuple(evidence_refs),
     )

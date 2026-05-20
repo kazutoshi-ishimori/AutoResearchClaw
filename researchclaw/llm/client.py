@@ -367,6 +367,25 @@ class LLMClient:
                     time.sleep(delay)
                     continue
                 raise
+            except json.JSONDecodeError as exc:
+                # Some OpenAI-compatible gateways occasionally return HTTP 200
+                # with a truncated/non-JSON body. Treat that as transient.
+                if attempt < self.config.max_retries - 1:
+                    delay = min(
+                        self.config.retry_base_delay * (2**attempt),
+                        _MAX_BACKOFF_SEC,
+                    )
+                    logger.info(
+                        "Retry %d/%d for %s (malformed API JSON: %s). Waiting %.1fs.",
+                        attempt + 1,
+                        self.config.max_retries,
+                        model,
+                        exc.msg,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
             except (TimeoutError, OSError) as exc:
                 # Covers TimeoutError, ConnectionResetError, IncompleteRead, etc.
                 if attempt < self.config.max_retries - 1:

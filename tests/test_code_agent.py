@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,15 @@ class FakeLLM:
             text = '```filename:main.py\nprint("hello")\n```'
         self._call_idx += 1
         return LLMResponse(content=text, model="fake-model")
+
+
+class SlowLLM:
+    """Fake LLM client that does not return before the call timeout."""
+
+    def chat(self, messages: list[dict], **kwargs: Any) -> LLMResponse:
+        _ = messages, kwargs
+        time.sleep(1.0)
+        return LLMResponse(content="too late", model="fake-model")
 
 
 @dataclass
@@ -96,6 +107,7 @@ class TestCodeAgentConfig:
         assert cfg.exec_fix_max_iterations == 3
         assert cfg.tree_search_enabled is False
         assert cfg.review_max_rounds == 2
+        assert cfg.llm_call_timeout_sec == 300
 
     def test_custom_values(self) -> None:
         cfg = CodeAgentConfig(
@@ -108,6 +120,40 @@ class TestCodeAgentConfig:
         assert cfg.exec_fix_max_iterations == 5
         assert cfg.tree_search_enabled is True
         assert cfg.tree_search_candidates == 5
+
+    def test_chat_fails_fast_when_llm_call_exceeds_timeout(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        agent = CodeAgent(
+            llm=SlowLLM(),
+            prompts=pm,
+            config=CodeAgentConfig(llm_call_timeout_sec=0.01),
+            stage_dir=stage_dir,
+        )
+
+        with pytest.raises(TimeoutError, match="CodeAgent LLM call timed out"):
+            agent._chat("system", "user")
+
+    def test_chat_timeout_does_not_leave_background_llm_thread(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        agent = CodeAgent(
+            llm=SlowLLM(),
+            prompts=pm,
+            config=CodeAgentConfig(llm_call_timeout_sec=0.01),
+            stage_dir=stage_dir,
+        )
+        before = {thread.ident for thread in threading.enumerate()}
+
+        with pytest.raises(TimeoutError, match="CodeAgent LLM call timed out"):
+            agent._chat("system", "user")
+
+        leaked = [
+            thread
+            for thread in threading.enumerate()
+            if thread.ident not in before and "_call_llm" in thread.name
+        ]
+        assert leaked == []
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +211,33 @@ class TestPhase1Architecture:
         first_call_user = llm.calls[0]["messages"][0]["content"]
         # The architecture planning prompt has "Design the architecture" phrasing
         assert "design the architecture for an experiment" not in first_call_user.lower()
+
+    def test_parse_blueprint_accepts_unclosed_yaml_fence(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        agent = CodeAgent(
+            llm=FakeLLM(), prompts=pm,
+            config=CodeAgentConfig(architecture_planning=False),
+            stage_dir=stage_dir,
+        )
+
+        blueprint = agent._parse_blueprint(
+            "```yaml\n"
+            "files:\n"
+            "  - name: config.py\n"
+            "    generation_order: 1\n"
+            "    purpose: constants\n"
+            "  - name: main.py\n"
+            "    generation_order: 2\n"
+            "    dependencies: [config.py]\n"
+            "    purpose: entry point\n"
+        )
+
+        assert blueprint is not None
+        assert [item["name"] for item in blueprint["files"]] == [
+            "config.py",
+            "main.py",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +329,81 @@ class TestPhase2ExecFix:
 
         # Should have exactly 2 sandbox runs (max iterations)
         assert result.total_sandbox_runs == 2
+
+    def test_exec_fix_repairs_successful_run_without_metrics(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        # A script that exits 0 but emits no metrics is not a valid experiment.
+        initial_code = (
+            "```filename:main.py\n"
+            "class ExperimentConfig:\n"
+            "    pass\n"
+            "```"
+        )
+        fixed_code = (
+            "```filename:main.py\n"
+            "def main():\n"
+            "    print('coverage_gap: 0.1')\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```"
+        )
+        review = '{"verdict": "APPROVE", "score": 8, "critical_issues": []}'
+        llm = FakeLLM(responses=[initial_code, fixed_code, review])
+
+        sandbox_results = [
+            FakeSandboxResult(returncode=0, stdout="", metrics={}),
+            FakeSandboxResult(
+                returncode=0,
+                stdout="coverage_gap: 0.1",
+                metrics={"coverage_gap": 0.1},
+            ),
+        ]
+        fake_sandbox = FakeSandbox(results=sandbox_results)
+
+        agent = CodeAgent(
+            llm=llm, prompts=pm,
+            config=CodeAgentConfig(
+                architecture_planning=False,
+                hard_validation=False,
+                exec_fix_max_iterations=3,
+            ),
+            stage_dir=stage_dir,
+            sandbox_factory=lambda cfg, wd: fake_sandbox,
+            experiment_config=None,
+        )
+        result = agent.generate(
+            topic="tabular conformal prediction",
+            exp_plan="plan",
+            metric="coverage_gap",
+            pkg_hint="",
+        )
+
+        assert result.total_sandbox_runs == 2
+        assert "coverage_gap" in result.files["main.py"]
+        assert any("no metrics" in line.lower() for line in result.validation_log)
+
+    def test_run_in_sandbox_clears_stale_attempt_files(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        stale_dir = stage_dir / "agent_runs" / "attempt_001"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "stale.py").write_text("print('old')", encoding="utf-8")
+
+        sandbox = FakeSandbox()
+        agent = CodeAgent(
+            llm=FakeLLM(),
+            prompts=pm,
+            config=CodeAgentConfig(),
+            stage_dir=stage_dir,
+            sandbox_factory=lambda cfg, wd: sandbox,
+            experiment_config=None,
+        )
+
+        agent._run_in_sandbox({"main.py": "print('new')"})
+
+        assert (stale_dir / "main.py").exists()
+        assert not (stale_dir / "stale.py").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +762,7 @@ class TestConfigIntegration:
                     "enabled": False,
                     "tree_search_enabled": True,
                     "tree_search_candidates": 5,
+                    "llm_call_timeout_sec": 123,
                 },
             },
         }
@@ -621,6 +770,7 @@ class TestConfigIntegration:
         assert cfg.experiment.code_agent.enabled is False
         assert cfg.experiment.code_agent.tree_search_enabled is True
         assert cfg.experiment.code_agent.tree_search_candidates == 5
+        assert cfg.experiment.code_agent.llm_call_timeout_sec == 123
 
 
 # ---------------------------------------------------------------------------

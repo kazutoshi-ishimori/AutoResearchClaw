@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,544 @@ _CONTINUOUS_ENVS = {
     "swimmer", "reacher", "invertedpendulum", "inverteddoublependulum",
     "mountaincarcontinuous", "lunarlander-continuous",
 }
+
+
+_SINGLE_CELL_STAGE10_TERMS = (
+    "single-cell",
+    "single cell",
+    "scrna",
+    "scrna-seq",
+    "fly cell atlas",
+    "anndata",
+    "h5ad",
+    "scanpy",
+)
+
+_TABULAR_STAGE10_TERMS = (
+    "tabular",
+    "structured data",
+    "conformal prediction",
+    "covariate shift",
+    "reliable machine learning",
+    "uncertainty quantification",
+    "synthetic benchmark",
+)
+
+_TABULAR_CPU_MAX_SAMPLES = 5000
+_TABULAR_CPU_MAX_ESTIMATORS = 50
+_TABULAR_CPU_MAX_SHIFT_REGIMES = 4
+_TABULAR_CPU_SEED_COUNT = 3
+
+
+class _Stage10TimeoutError(TimeoutError):
+    """Raised when a Stage 10 subtask exceeds its explicit wall-clock budget."""
+
+
+def _run_with_stage10_timeout(
+    func: Any,
+    *,
+    timeout_sec: float,
+    label: str,
+) -> Any:
+    """Run a synchronous Stage 10 callable with an explicit wall-clock timeout."""
+    if timeout_sec <= 0:
+        return func()
+
+    import signal
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _handle_timeout(signum: int, frame: Any) -> None:
+        _ = signum, frame
+        raise _Stage10TimeoutError(
+            f"{label} timed out after {timeout_sec:g}s"
+        )
+
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+    try:
+        return func()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if old_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+        signal.signal(signal.SIGALRM, old_handler)
+
+_DATA_READ_PATTERNS = (
+    r"(?:np|numpy)\.load\(\s*[rubfRUBF]*[\"']([^\"']+\.(?:npz|npy))[\"']",
+    r"(?:pd|pandas)\.read_(?:csv|table)\(\s*[rubfRUBF]*[\"']([^\"']+\.(?:csv|tsv))[\"']",
+    r"(?:sc|scanpy|anndata|ad)\.read_h5ad\(\s*[rubfRUBF]*[\"']([^\"']+\.h5ad)[\"']",
+    r"h5py\.File\(\s*[rubfRUBF]*[\"']([^\"']+\.(?:h5|hdf5))[\"']\s*,\s*[\"']r",
+)
+
+_DATA_WRITE_PATTERNS = (
+    r"(?:np|numpy)\.savez(?:_compressed)?\(\s*[rubfRUBF]*[\"']([^\"']+\.npz)[\"']",
+    r"(?:np|numpy)\.save\(\s*[rubfRUBF]*[\"']([^\"']+\.npy)[\"']",
+    r"\.to_csv\(\s*[rubfRUBF]*[\"']([^\"']+\.(?:csv|tsv))[\"']",
+    r"\.write_h5ad\(\s*[rubfRUBF]*[\"']([^\"']+\.h5ad)[\"']",
+    r"h5py\.File\(\s*[rubfRUBF]*[\"']([^\"']+\.(?:h5|hdf5))[\"']\s*,\s*[\"']w",
+)
+
+_SANDBOX_UNAVAILABLE_BIO_DEPS = (
+    "scanpy",
+    "anndata",
+    "magic",
+    "alra",
+    "cellchat",
+    "hdwgcna",
+    "wgcna",
+    "scvi",
+)
+
+
+def _is_single_cell_stage10_topic(topic: str) -> bool:
+    text = topic.lower()
+    return any(term in text for term in _SINGLE_CELL_STAGE10_TERMS)
+
+
+def _is_tabular_stage10_topic(topic: str) -> bool:
+    text = topic.lower()
+    has_tabular_signal = any(
+        term in text for term in ("tabular", "structured data")
+    )
+    has_budgeted_ml_signal = any(
+        term in text
+        for term in (
+            "conformal prediction",
+            "covariate shift",
+            "reliable machine learning",
+            "uncertainty quantification",
+            "synthetic benchmark",
+        )
+    )
+    return has_tabular_signal and has_budgeted_ml_signal
+
+
+def _stage10_data_contract_guidance(
+    *,
+    topic: str,
+    experiment_mode: str,
+    network_policy: str,
+) -> str:
+    """Return Stage 10 data/dependency constraints for code generation."""
+    if experiment_mode not in ("sandbox", "docker"):
+        return ""
+    if not _is_single_cell_stage10_topic(topic):
+        return ""
+    offline = experiment_mode == "sandbox" or network_policy == "none"
+    if not offline:
+        return ""
+    return (
+        "\n\n## STAGE 10 SINGLE-CELL DATA CONTRACT (MANDATORY)\n"
+        "- The experiment MUST be self-contained in sandbox/no-network mode.\n"
+        "- Do NOT load a file such as `.npz`, `.npy`, `.h5ad`, `.h5`, `.csv`, "
+        "or `.tsv` unless your generated code creates that exact file before "
+        "reading it in the same project.\n"
+        "- If real Fly Cell Atlas AnnData is unavailable, generate a small "
+        "synthetic single-cell matrix with tissue, cell_type, and ecdysone-gene "
+        "metadata, then analyze that generated data.\n"
+        "- In sandbox mode, do NOT import or require `scanpy` or `anndata`. "
+        "Implement the runnable path with numpy, pandas, and scikit-learn "
+        "only.\n"
+        "- The generated project MUST include a numpy/pandas/sklearn fallback "
+        "path that creates synthetic single-cell-like data, metadata, and "
+        "metrics without `scanpy` or `anndata`.\n"
+        "- Do NOT implement hdWGCNA, MAGIC, ALRA, CellChat, UCell, or scVI as "
+        "required packages. Map those ideas to lightweight "
+        "numpy/pandas/sklearn approximations such as correlation matrices, "
+        "module scores, seeded dropout sensitivity, clustering summaries, and "
+        "ligand-expression coupling scores.\n"
+        "- The entry point MUST emit non-empty metrics for at least two baselines "
+        "and one proposed condition across three seeds.\n"
+    )
+
+
+def _stage10_tabular_cpu_budget_guidance(
+    *,
+    topic: str,
+    experiment_mode: str,
+    network_policy: str,
+) -> str:
+    """Return Stage 10 CPU budget constraints for tabular sandbox code."""
+    if experiment_mode not in ("sandbox", "docker"):
+        return ""
+    if not _is_tabular_stage10_topic(topic):
+        return ""
+    offline = experiment_mode == "sandbox" or network_policy == "none"
+    if not offline:
+        return ""
+    return (
+        "\n\n## STAGE 10 TABULAR CPU BUDGET CONTRACT (MANDATORY)\n"
+        "- The generated experiment MUST run on local CPU within sandbox mode.\n"
+        f"- Set n_samples <= {_TABULAR_CPU_MAX_SAMPLES} for synthetic tabular "
+        "data.\n"
+        f"- Set n_estimators <= {_TABULAR_CPU_MAX_ESTIMATORS} for every "
+        "tree/ensemble model.\n"
+        f"- Evaluate shift regimes <= {_TABULAR_CPU_MAX_SHIFT_REGIMES} total "
+        "(for example 2 shift types x 2 magnitudes).\n"
+        f"- Use seeds = {_TABULAR_CPU_SEED_COUNT} exactly and report mean/std.\n"
+        "- Use numpy/pandas/sklearn/scipy only for the runnable path; do not "
+        "download external datasets and do not require GPU.\n"
+        "- Use documented scikit-learn constructor signatures only. Do not "
+        "pass invented keyword arguments to estimators; instantiate first, "
+        "then call `fit(...)` with training data.\n"
+    )
+
+
+def _stage10_runnable_metric_guidance(*, metric: str) -> str:
+    return (
+        "\n\n## STAGE 10 RUNNABLE METRIC CONTRACT (MANDATORY)\n"
+        "- `main.py` MUST execute a real experiment when run as a script. Do "
+        "not return only classes, config objects, or helper functions.\n"
+        "- Include `if __name__ == '__main__': main()` or equivalent top-level "
+        "execution that calls the experiment.\n"
+        f"- The entry point MUST print the primary metric exactly as "
+        f"`{metric}: <float>` and write a non-empty `results.json` when "
+        "possible.\n"
+        "- If the experiment cannot compute the metric, fail explicitly instead "
+        "of exiting 0 with no output.\n"
+    )
+
+
+def _collect_stage10_literal_paths(
+    files: dict[str, str],
+    patterns: tuple[str, ...],
+) -> set[str]:
+    paths: set[str] = set()
+    for code in files.values():
+        for pattern in patterns:
+            for match in re.finditer(pattern, code):
+                paths.add(Path(match.group(1)).name)
+    return paths
+
+
+def _has_optional_import_fallback(code: str, module: str) -> bool:
+    return (
+        f"import {module}" in code
+        and "except ImportError" in code
+    ) or (
+        f"from {module} import" in code
+        and "except ImportError" in code
+    )
+
+
+def _project_imports_module(files: dict[str, str], module: str) -> bool:
+    pattern = re.compile(
+        rf"^\s*(?:import\s+[\w\s,\.]*\b{re.escape(module)}\b|"
+        rf"from\s+{re.escape(module)}(?:\.|\s+import\b))",
+        re.MULTILINE,
+    )
+    return any(pattern.search(code) for code in files.values())
+
+
+def _validate_stage10_data_contract(
+    files: dict[str, str],
+    *,
+    topic: str,
+    experiment_mode: str,
+    network_policy: str,
+) -> list[dict[str, str]]:
+    """Static Stage 10 contract checks for self-contained generated code."""
+    if experiment_mode not in ("sandbox", "docker"):
+        return []
+    if not _is_single_cell_stage10_topic(topic):
+        return []
+    offline = experiment_mode == "sandbox" or network_policy == "none"
+    if not offline:
+        return []
+
+    violations: list[dict[str, str]] = []
+    generated_file_names = {Path(fname).name for fname in files}
+    generated_data = _collect_stage10_literal_paths(files, _DATA_WRITE_PATTERNS)
+    read_data = _collect_stage10_literal_paths(files, _DATA_READ_PATTERNS)
+    for data_path in sorted(read_data - generated_data - generated_file_names):
+        violations.append({
+            "category": "missing_generated_data_file",
+            "path": data_path,
+            "message": (
+                f"Generated Stage 10 code reads '{data_path}' but no generated "
+                "file or code path creates it before execution."
+            ),
+        })
+
+    for fname, code in files.items():
+        if not fname.endswith(".py"):
+            continue
+        for module in _SANDBOX_UNAVAILABLE_BIO_DEPS:
+            import_match = re.search(
+                rf"^\s*(?:import\s+{module}\b|from\s+{module}\s+import\b)",
+                code,
+                re.MULTILINE,
+            )
+            if import_match and experiment_mode == "sandbox":
+                violations.append({
+                    "category": "forbidden_sandbox_dependency",
+                    "path": fname,
+                    "message": (
+                        f"{fname} imports '{module}', but Stage 10 sandbox "
+                        "single-cell experiments must be runnable without "
+                        "heavy single-cell packages. Use numpy, pandas, and "
+                        "sklearn only."
+                    ),
+                })
+            elif import_match and not _has_optional_import_fallback(code, module):
+                violations.append({
+                    "category": "unavailable_required_dependency",
+                    "path": fname,
+                    "message": (
+                        f"{fname} requires '{module}' in sandbox/no-network mode. "
+                        "Use an optional ImportError fallback or implement the "
+                        "analysis with available numpy/pandas/sklearn tools."
+                    ),
+                })
+    missing_fallback_modules = [
+        module for module in ("numpy", "pandas", "sklearn")
+        if not _project_imports_module(files, module)
+    ]
+    if experiment_mode == "sandbox" and missing_fallback_modules:
+        violations.append({
+            "category": "missing_numpy_pandas_sklearn_fallback",
+            "path": "experiment/",
+            "message": (
+                "Sandbox single-cell Stage 10 code must include a runnable "
+                "numpy/pandas/sklearn fallback path. Missing imports: "
+                + ", ".join(missing_fallback_modules)
+            ),
+        })
+    return violations
+
+
+def _collect_named_int_literals(files: dict[str, str], names: tuple[str, ...]) -> list[tuple[str, str, int]]:
+    found: list[tuple[str, str, int]] = []
+    for fname, code in files.items():
+        for name in names:
+            patterns = (
+                rf"(?i)(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])\s*"
+                rf"(?:[:=]\s*|:\s*[^=\n]+=\s*)(\d+)",
+                rf"(?i)[\"']{re.escape(name)}[\"']\s*:\s*(\d+)",
+            )
+            for pattern in patterns:
+                for match in re.finditer(pattern, code):
+                    try:
+                        found.append((fname, name, int(match.group(1))))
+                    except ValueError:
+                        continue
+    return found
+
+
+def _literal_list_length(source: str) -> int | None:
+    items = [item.strip() for item in source.split(",") if item.strip()]
+    if not items:
+        return 0
+    if any((" for " in item or "(" in item or ")" in item) for item in items):
+        return None
+    return len(items)
+
+
+def _collect_named_list_lengths(
+    files: dict[str, str],
+    names: tuple[str, ...],
+) -> list[tuple[str, str, int]]:
+    found: list[tuple[str, str, int]] = []
+    for fname, code in files.items():
+        for name in names:
+            patterns = (
+                rf"(?is)(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])\s*"
+                rf"(?:=\s*|:\s*[^=\n]+=\s*)\[([^\]]*)\]",
+                rf"(?is)[\"']{re.escape(name)}[\"']\s*:\s*\[([^\]]*)\]",
+            )
+            for pattern in patterns:
+                for match in re.finditer(pattern, code):
+                    length = _literal_list_length(match.group(1))
+                    if length is not None:
+                        found.append((fname, name, length))
+    return found
+
+
+def _validate_tabular_cpu_budget_contract(
+    files: dict[str, str],
+    *,
+    topic: str,
+    experiment_mode: str,
+    network_policy: str,
+) -> list[dict[str, str]]:
+    """Static checks for CPU-bounded tabular synthetic experiments."""
+    if experiment_mode not in ("sandbox", "docker"):
+        return []
+    if not _is_tabular_stage10_topic(topic):
+        return []
+    offline = experiment_mode == "sandbox" or network_policy == "none"
+    if not offline:
+        return []
+
+    violations: list[dict[str, str]] = []
+    for fname, name, value in _collect_named_int_literals(
+        files,
+        ("n_samples", "num_samples", "sample_count", "n_train"),
+    ):
+        if value > _TABULAR_CPU_MAX_SAMPLES:
+            violations.append({
+                "category": "tabular_cpu_budget_n_samples",
+                "path": fname,
+                "message": (
+                    f"{fname} sets {name}={value}, but sandbox tabular CPU "
+                    f"runs require n_samples <= {_TABULAR_CPU_MAX_SAMPLES}."
+                ),
+            })
+    for fname, name, value in _collect_named_int_literals(
+        files,
+        ("n_estimators", "num_estimators"),
+    ):
+        if value > _TABULAR_CPU_MAX_ESTIMATORS:
+            violations.append({
+                "category": "tabular_cpu_budget_n_estimators",
+                "path": fname,
+                "message": (
+                    f"{fname} sets {name}={value}, but sandbox tabular CPU "
+                    f"runs require n_estimators <= {_TABULAR_CPU_MAX_ESTIMATORS}."
+                ),
+            })
+
+    seed_lengths = _collect_named_list_lengths(files, ("seeds",))
+    for fname, name, length in seed_lengths:
+        if length > _TABULAR_CPU_SEED_COUNT:
+            violations.append({
+                "category": "tabular_cpu_budget_seeds",
+                "path": fname,
+                "message": (
+                    f"{fname} sets {name} to {length} seeds, but sandbox "
+                    f"tabular CPU runs require seeds = {_TABULAR_CPU_SEED_COUNT}."
+                ),
+            })
+
+    type_lengths = _collect_named_list_lengths(
+        files,
+        ("shift_types", "shift_type"),
+    )
+    magnitude_lengths = _collect_named_list_lengths(
+        files,
+        (
+            "shift_magnitudes",
+            "shift_magnitude",
+        ),
+    )
+    for type_fname, type_name, type_len in type_lengths:
+        for mag_fname, mag_name, mag_len in magnitude_lengths:
+            regimes = type_len * mag_len
+            if regimes > _TABULAR_CPU_MAX_SHIFT_REGIMES:
+                violations.append({
+                    "category": "tabular_cpu_budget_shift_regimes",
+                    "path": f"{type_fname},{mag_fname}",
+                    "message": (
+                        f"{type_name} x {mag_name} defines {regimes} shift "
+                        f"regimes, but sandbox tabular CPU runs require "
+                        f"shift regimes <= {_TABULAR_CPU_MAX_SHIFT_REGIMES}."
+                    ),
+                })
+                break
+        if any(v["category"] == "tabular_cpu_budget_shift_regimes" for v in violations):
+            break
+    return violations
+
+
+def _main_has_executable_entrypoint(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    executable_nodes = (
+        ast.For,
+        ast.While,
+        ast.With,
+        ast.Try,
+        ast.Expr,
+        ast.If,
+    )
+    passive_nodes = (
+        ast.Import,
+        ast.ImportFrom,
+        ast.Assign,
+        ast.AnnAssign,
+        ast.AugAssign,
+        ast.ClassDef,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+    )
+    for node in tree.body:
+        if isinstance(node, ast.If):
+            text = ast.unparse(node.test) if hasattr(ast, "unparse") else ""
+            if "__name__" in text and "__main__" in text:
+                return True
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        if isinstance(node, executable_nodes) and not isinstance(node, passive_nodes):
+            return True
+    return False
+
+
+def _code_mentions_metric_output(code: str, metric: str) -> bool:
+    if metric not in code:
+        return False
+    has_output_call = any(
+        token in code
+        for token in (
+            "print(",
+            "report_metric(",
+            ".report_metric(",
+            "json.dump(",
+            "results.json",
+        )
+    )
+    if not has_output_call:
+        return False
+    metric_line = rf"{re.escape(metric)}\s*:"
+    return re.search(metric_line, code) is not None or "report_metric" in code
+
+
+def _validate_stage10_runnable_metric_contract(
+    files: dict[str, str],
+    *,
+    metric: str,
+) -> list[dict[str, str]]:
+    """Static check that Stage 10 code has a runnable metric-emitting entry point."""
+    violations: list[dict[str, str]] = []
+    main_code = files.get("main.py", "")
+    if not main_code:
+        return [{
+            "category": "missing_main_py",
+            "path": "main.py",
+            "message": "Stage 10 generated code must include main.py.",
+        }]
+
+    if not _main_has_executable_entrypoint(main_code):
+        violations.append({
+            "category": "missing_executable_entrypoint",
+            "path": "main.py",
+            "message": (
+                "main.py defines only passive code and has no executable "
+                "experiment entry point. Add main() execution that runs the "
+                "experiment."
+            ),
+        })
+    all_code = "\n\n".join(
+        code for fname, code in files.items() if fname.endswith(".py")
+    )
+    if not _code_mentions_metric_output(all_code, metric):
+        violations.append({
+            "category": "missing_primary_metric_output",
+            "path": "experiment/",
+            "message": (
+                f"Stage 10 generated code does not visibly emit the primary "
+                f"metric '{metric}'. The entry point must print "
+                f"'{metric}: <float>' or call report_metric with that key."
+            ),
+        })
+    return violations
 
 
 def _check_rl_compatibility(code: str) -> list[str]:
@@ -185,6 +724,17 @@ def _execute_code_generation(
             extra_guidance += _pm.block("multi_seed_enforcement")
         except Exception:  # noqa: BLE001
             pass
+        extra_guidance += _stage10_data_contract_guidance(
+            topic=config.research.topic,
+            experiment_mode=config.experiment.mode,
+            network_policy=_net_policy,
+        )
+        extra_guidance += _stage10_runnable_metric_guidance(metric=metric)
+        extra_guidance += _stage10_tabular_cpu_budget_guidance(
+            topic=config.research.topic,
+            experiment_mode=config.experiment.mode,
+            network_policy=_net_policy,
+        )
 
     # --- BA: Inject BenchmarkAgent plan from Stage 9 ---
     _bp_path = None
@@ -513,13 +1063,41 @@ def _execute_code_generation(
             domain_profile=_domain_profile,
             code_search_result=_code_search_result,
         )
-        _agent_result = _agent.generate(
-            topic=config.research.topic,
-            exp_plan=exp_plan,
-            metric=metric,
-            pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
-            max_tokens=_code_max_tokens,
+        _code_agent_timeout = float(
+            getattr(config.experiment.cli_agent, "timeout_sec", 600) or 600
         )
+        try:
+            _agent_result = _run_with_stage10_timeout(
+                lambda: _agent.generate(
+                    topic=config.research.topic,
+                    exp_plan=exp_plan,
+                    metric=metric,
+                    pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
+                    max_tokens=_code_max_tokens,
+                ),
+                timeout_sec=_code_agent_timeout,
+                label="CodeAgent",
+            )
+        except _Stage10TimeoutError as exc:
+            _timeout_report = {
+                "ok": False,
+                "component": "CodeAgent",
+                "timeout_sec": _code_agent_timeout,
+                "error": str(exc),
+                "generated": _utcnow_iso(),
+            }
+            (stage_dir / "code_agent_timeout.json").write_text(
+                json.dumps(_timeout_report, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.error("Stage 10 CodeAgent timed out: %s", exc)
+            return StageResult(
+                stage=Stage.CODE_GENERATION,
+                status=StageStatus.FAILED,
+                artifacts=("code_agent_timeout.json",),
+                evidence_refs=("stage-10/code_agent_timeout.json",),
+                error=str(exc),
+            )
         files = _agent_result.files
         _code_agent_active = True
 
@@ -1302,6 +1880,57 @@ def _execute_code_generation(
         except Exception as exc:
             logger.debug("Ablation validation skipped: %s", exc)
 
+    _contract_network_policy = (
+        config.experiment.docker.network_policy
+        if config.experiment.mode == "docker"
+        else "none"
+    )
+    _contract_violations = _validate_stage10_data_contract(
+        files,
+        topic=config.research.topic,
+        experiment_mode=config.experiment.mode,
+        network_policy=_contract_network_policy,
+    )
+    _contract_violations.extend(
+        _validate_tabular_cpu_budget_contract(
+            files,
+            topic=config.research.topic,
+            experiment_mode=config.experiment.mode,
+            network_policy=_contract_network_policy,
+        )
+    )
+    _contract_violations.extend(
+        _validate_stage10_runnable_metric_contract(
+            files,
+            metric=metric,
+        )
+    )
+    if _contract_violations:
+        _contract_report = {
+            "ok": False,
+            "violations": _contract_violations,
+            "generated": _utcnow_iso(),
+        }
+        (stage_dir / "stage10_data_contract.json").write_text(
+            json.dumps(_contract_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        _messages = [
+            str(v.get("message", v)) for v in _contract_violations
+        ]
+        _error = "Stage 10 data contract failed: " + "; ".join(_messages)
+        logger.error(_error)
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=("experiment/", "stage10_data_contract.json"),
+            evidence_refs=(
+                "stage-10/experiment/",
+                "stage-10/stage10_data_contract.json",
+            ),
+            error=_error,
+        )
+
     # --- Write spec ---
     file_list = ", ".join(f"`{f}`" for f in sorted(files.keys()))
     main_validation = validate_code(files.get("main.py", ""))
@@ -1361,4 +1990,3 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
         artifacts=tuple(artifacts),
         evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
     )
-
