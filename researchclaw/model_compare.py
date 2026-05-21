@@ -26,6 +26,8 @@ def collect_run_summary(run_dir: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
     pipeline = _read_json(run_dir / "pipeline_summary.json")
     if not pipeline:
+        pipeline = _pipeline_from_checkpoint(run_dir)
+    if not pipeline:
         raise ValueError(f"No pipeline_summary.json found in {run_dir}")
 
     config = _read_run_config(run_dir)
@@ -253,6 +255,22 @@ def _read_run_config(run_dir: Path) -> dict[str, Any]:
     return {}
 
 
+def _pipeline_from_checkpoint(run_dir: Path) -> dict[str, Any]:
+    checkpoint = _read_json(run_dir / "checkpoint.json")
+    if not checkpoint:
+        return {}
+    last_stage = _as_number(checkpoint.get("last_completed_stage"))
+    return {
+        "run_id": checkpoint.get("run_id", run_dir.name),
+        "stages_done": last_stage,
+        "stages_executed": 23 if last_stage is not None else None,
+        "stages_failed": 0,
+        "final_status": "interrupted",
+        "final_stage": last_stage,
+        "generated": checkpoint.get("timestamp"),
+    }
+
+
 def _find_stage_file(run_dir: Path, stage_name: str, filename: str) -> Path | None:
     direct = run_dir / stage_name / filename
     if direct.is_file():
@@ -269,7 +287,7 @@ def _find_stage_file(run_dir: Path, stage_name: str, filename: str) -> Path | No
 
 def _infer_model_from_name(name: str) -> str | None:
     lower = name.lower()
-    if "gpt-oss" in lower:
+    if "gpt-oss" in lower or "gptoss" in lower:
         return "gpt-oss:120b-cloud" if "cloud" in lower else "openai/gpt-oss-120b"
     if "gemma4" in lower:
         return "gemma4:31b-cloud" if "cloud" in lower else "google/gemma-4"
@@ -279,6 +297,12 @@ def _infer_model_from_name(name: str) -> str | None:
         return "qwen/qwen3.6-27b"
     if "mistral" in lower:
         return "mistral-large-3:675b-cloud"
+    if "deepseek" in lower:
+        if "flash" in lower:
+            return "deepseek-v4-flash:cloud"
+        if "pro" in lower:
+            return "deepseek-v4-pro:cloud"
+        return "deepseek-v4:cloud"
     if "kimi" in lower:
         return "kimi-k2.6"
     if "nemotron" in lower:
@@ -364,6 +388,11 @@ def _rank_score(row: dict[str, Any]) -> tuple[float, float]:
         score -= min(1.0, (page_count - 10) * 0.15)
     if row.get("final_status") not in ("done", "completed", "success"):
         score -= 1.0
+    # A run with only completion evidence can otherwise look deceptively good:
+    # e.g. Stage 7/8 failed has high completion_ratio but no paper quality,
+    # PDF, or citation evidence.  Keep it visible, but make low evidence
+    # coverage matter in the rank itself.
+    score *= 0.25 + (0.75 * coverage)
     score = max(0.0, min(10.0, score))
     return round(score, 2), round(coverage, 3)
 

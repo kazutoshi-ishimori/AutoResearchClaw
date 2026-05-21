@@ -3361,6 +3361,38 @@ class TestValidateDraftQuality:
         assert "overall_warnings" in data
         assert "revision_directives" in data
 
+    def test_accepts_compact_section_targets(self) -> None:
+        """Compact paper targets should not trigger standard-length expansion."""
+        draft = _build_draft(
+            Introduction=_make_prose(620),
+            **{
+                "Related Work": _make_prose(460),
+                "Method": _make_prose(700),
+                "Experiments": _make_prose(560),
+                "Results": _make_prose(460),
+                "Discussion": _make_prose(320),
+                "Limitations": _make_prose(160),
+                "Conclusion": _make_prose(160),
+            },
+        )
+        compact_targets = {
+            "introduction": (550, 700),
+            "related work": (400, 520),
+            "method": (650, 820),
+            "experiments": (500, 650),
+            "results": (400, 520),
+            "discussion": (280, 380),
+            "limitations": (120, 220),
+            "conclusion": (120, 200),
+        }
+
+        result = rc_executor._validate_draft_quality(
+            draft,
+            section_word_targets=compact_targets,
+        )
+
+        assert not any("under target" in w for w in result["overall_warnings"])
+
 
 class TestExperimentValidatorPrecision:
     def test_deep_validation_detects_undefined_helper_calls(self) -> None:

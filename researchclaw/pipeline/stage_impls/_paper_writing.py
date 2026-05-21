@@ -43,6 +43,68 @@ from researchclaw.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 
+def _paper_section_word_targets(
+    config: RCConfig | None = None,
+) -> dict[str, tuple[int, int]]:
+    """Return section word targets, scaled down for configured concise papers."""
+    from researchclaw.prompts import SECTION_WORD_TARGETS
+
+    targets = dict(SECTION_WORD_TARGETS)
+    if config is None:
+        return targets
+
+    export = getattr(config, "export", None)
+    word_max = int(getattr(export, "main_body_word_max", 6500) or 6500)
+    page_limit = int(getattr(export, "page_limit", 10) or 10)
+    if word_max >= 5000 and page_limit >= 10:
+        return targets
+
+    # Default targets sum to a long conference paper. Scale main sections for
+    # concise-paper experiments while keeping abstract/conclusion readable.
+    default_budget = sum((lo + hi) / 2 for lo, hi in targets.values())
+    scale = max(0.45, min(1.0, word_max / default_budget))
+    compact: dict[str, tuple[int, int]] = {}
+    for section, (lo, hi) in targets.items():
+        new_lo = max(100, int(lo * scale))
+        new_hi = max(new_lo + 40, int(hi * scale))
+        compact[section] = (new_lo, new_hi)
+    compact["abstract"] = (150, 200)
+    compact["conclusion"] = (120, 200)
+    compact["limitations"] = (120, max(200, compact.get("limitations", (120, 200))[1]))
+    return compact
+
+
+def _paper_length_instruction(config: RCConfig | None = None) -> str:
+    """Prompt block for the configured paper length contract."""
+    export = getattr(config, "export", None)
+    page_limit = int(getattr(export, "page_limit", 10) or 10)
+    word_min = int(getattr(export, "main_body_word_min", 5000) or 5000)
+    word_max = int(getattr(export, "main_body_word_max", 6500) or 6500)
+    if word_max >= 5000 and page_limit >= 10:
+        return (
+            "PAPER LENGTH CONTRACT: Target 8-9 pages of main content, "
+            "not exceeding 10 pages. Main body target is 5,000-6,500 words.\n"
+        )
+    return (
+        "PAPER LENGTH CONTRACT (CRITICAL): This is a concise-paper run.\n"
+        f"- Final PDF MUST fit within {page_limit} pages excluding references.\n"
+        f"- Main body target: {word_min}-{word_max} words excluding references.\n"
+        "- Prefer one compact table for main results and one figure if available; "
+        "avoid redundant tables and repeated numeric prose.\n"
+        "- Do not expand sections solely to look like a 9-page paper; preserve rigor "
+        "by cutting repetition, not by removing evidence.\n"
+    )
+
+
+def _section_target_text(
+    targets: dict[str, tuple[int, int]],
+    section: str,
+    label: str | None = None,
+) -> str:
+    lo, hi = targets[section]
+    return f"{label or section.title()} ({lo}-{hi} words)"
+
+
 def _topic_is_literature_first(config: RCConfig) -> bool:
     """Return True when the topic is a survey/review or the project uses docs-first mode.
 
@@ -349,6 +411,7 @@ def _write_paper_sections(
     llm: LLMClient,
     pm: PromptManager,
     run_dir: Path | None = None,
+    config: RCConfig | None = None,
     preamble: str,
     topic_constraint: str,
     exp_metrics_instruction: str,
@@ -369,6 +432,8 @@ def _write_paper_sections(
         _writing_structure = pm.block("writing_structure")
     except (KeyError, Exception):  # noqa: BLE001
         _writing_structure = ""
+    _length_instruction = _paper_length_instruction(config)
+    _section_targets = _paper_section_word_targets(config)
 
     _overlay = _get_evolution_overlay(run_dir, "paper_draft")
     system = pm.for_stage(
@@ -419,6 +484,7 @@ def _write_paper_sections(
         f"{citation_instruction}\n\n"
         f"{title_guidelines}\n\n"
         f"{academic_style_guide}\n"
+        f"{_length_instruction}\n"
         f"{narrative_writing_rules}\n"
         f"{anti_hedging_rules}\n"
         f"{anti_repetition_rules}\n\n"
@@ -429,10 +495,10 @@ def _write_paper_sections(
         "it will be automatically rejected. NEVER use 'Untitled Paper'.)\n"
         f"2. **Abstract** (150-220 words — HARD LIMIT. Do NOT exceed 220 words. "
         f"Do NOT include raw metric paths or 16-digit decimals.){abstract_structure}\n"
-        "3. **Introduction** (800-1000 words): real-world motivation, problem statement, "
+        f"3. **Introduction** {_section_target_text(_section_targets, 'introduction')}: real-world motivation, problem statement, "
         "research gap analysis with citations, method overview, 3-4 contributions as bullet points, "
         "paper organization paragraph. MUST cite 8-12 references.\n"
-        "4. **Related Work** (600-800 words): organized into 3-4 thematic subsections, each discussing "
+        f"4. **Related Work** {_section_target_text(_section_targets, 'related work')}: organized into 2-3 thematic subsections, each discussing "
         "4-5 papers with proper citations. Compare approaches, identify limitations, position this work.\n\n"
         f"Outline:\n{outline}\n\n"
         "Output markdown with ## headers. Do NOT include a References section.\n"
@@ -466,6 +532,7 @@ def _write_paper_sections(
         f"{preamble}\n\n"
         f"{topic_constraint}"
         f"{exp_metrics_instruction}\n\n"
+        f"{_length_instruction}\n"
         f"{narrative_writing_rules}\n"
         f"{anti_hedging_rules}\n\n"
         # IMP-21: Citation instruction for Method + Experiments
@@ -476,11 +543,11 @@ def _write_paper_sections(
         "You are continuing a paper. The sections written so far are:\n\n"
         f"---\n{part1}\n---\n\n"
         "Now write the next sections, maintaining consistency with the above:\n\n"
-        "5. **Method** (1000-1500 words): formal problem definition with mathematical notation "
+        f"5. **Method** {_section_target_text(_section_targets, 'method')}: formal problem definition with mathematical notation "
         "($x$, $\\theta$, etc.), detailed algorithm description with equations, step-by-step procedure, "
         "complexity analysis, design rationale for key choices. Include algorithm pseudocode if applicable. "
         "Write as FLOWING PROSE — do NOT use bullet-point lists for method components.\n"
-        "6. **Experiments** (800-1200 words): detailed experimental setup, datasets with statistics "
+        f"6. **Experiments** {_section_target_text(_section_targets, 'experiments')}: detailed experimental setup, datasets with statistics "
         "(size, splits, features), all baselines and their implementations, hyperparameter settings "
         "in a markdown table, evaluation metrics with mathematical definitions, hardware and runtime info.\n"
         "METHOD NAMES IN TABLES: Use SHORT abbreviations (4-8 chars) for method names "
@@ -506,6 +573,7 @@ def _write_paper_sections(
         f"{preamble}\n\n"
         f"{topic_constraint}"
         f"{exp_metrics_instruction}\n\n"
+        f"{_length_instruction}\n"
         f"{narrative_writing_rules}\n"
         f"{anti_hedging_rules}\n"
         f"{anti_repetition_rules}\n\n"
@@ -517,7 +585,7 @@ def _write_paper_sections(
         "You are completing a paper. The sections written so far are:\n\n"
         f"---\n{part1}\n\n{part2}\n---\n\n"
         "Now write the final sections, maintaining consistency:\n\n"
-        "7. **Results** (600-800 words):\n"
+        f"7. **Results** {_section_target_text(_section_targets, 'results')}:\n"
         "   - START with an AGGREGATED results table (Table 1): rows = methods, columns = metrics.\n"
         "     Each cell = mean \u00b1 std across seeds. Bold the best value per column.\n"
         "     EVERY table MUST have a descriptive caption that allows understanding without "
@@ -528,11 +596,11 @@ def _write_paper_sections(
         "   - MUST include at least 2 figures using markdown image syntax: ![Caption](charts/filename.png)\n"
         "     One figure MUST be a performance comparison chart. Figures MUST be referenced "
         "     in text: 'As shown in Figure 1, ...'\n"
-        "8. **Discussion** (400-600 words): interpretation of key findings, unexpected results, "
+        f"8. **Discussion** {_section_target_text(_section_targets, 'discussion')}: interpretation of key findings, unexpected results, "
         "comparison with prior work (CITE 3-5 papers here!), practical implications.\n"
-        "9. **Limitations** (200-300 words): honest assessment of scope, dataset, methodology. "
+        f"9. **Limitations** {_section_target_text(_section_targets, 'limitations')}: honest assessment of scope, dataset, methodology. "
         "ALL caveats consolidated HERE — nowhere else in the paper.\n"
-        "10. **Conclusion** (100-200 words MAXIMUM — this is a HARD LIMIT): "
+        f"10. **Conclusion** {_section_target_text(_section_targets, 'conclusion')} — this is a HARD LIMIT: "
         "Summarize contributions in 2-3 sentences. State main finding in 1 sentence. "
         "Suggest 2-3 concrete future directions in 1-2 sentences. "
         "Do NOT repeat any specific numbers from Results. Do NOT restate the abstract. "
@@ -601,6 +669,7 @@ _BALANCE_SECTIONS = frozenset({
 def _validate_draft_quality(
     draft: str,
     stage_dir: Path | None = None,
+    section_word_targets: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     """Validate a paper draft for section balance and prose quality.
 
@@ -614,6 +683,8 @@ def _validate_draft_quality(
     *stage_dir*.
     """
     from researchclaw.prompts import SECTION_WORD_TARGETS, _SECTION_TARGET_ALIASES
+
+    effective_targets = section_word_targets or SECTION_WORD_TARGETS
 
     _heading_re = re.compile(r"^(#{1,4})\s+(.+)$", re.MULTILINE)
     matches = list(_heading_re.finditer(draft))
@@ -661,15 +732,15 @@ def _validate_draft_quality(
         # BUG-24: Include subsection words in the parent's word count
         word_count = len(body.split()) + _subsection_words.get(heading_lower, 0)
         canon = heading_lower
-        if canon not in SECTION_WORD_TARGETS:
+        if canon not in effective_targets:
             canon = _SECTION_TARGET_ALIASES.get(heading_lower, "")
         entry: dict[str, Any] = {
             "heading": sec["heading"],
             "word_count": word_count,
             "canonical": canon,
         }
-        if canon and canon in SECTION_WORD_TARGETS:
-            lo, hi = SECTION_WORD_TARGETS[canon]
+        if canon and canon in effective_targets:
+            lo, hi = effective_targets[canon]
             entry["target"] = [lo, hi]
             if word_count < int(lo * 0.7):
                 overall_warnings.append(
@@ -2040,6 +2111,7 @@ def _execute_paper_draft(
             llm=llm,
             pm=_pm,
             run_dir=run_dir,
+            config=config,
             preamble=preamble,
             topic_constraint=topic_constraint,
             exp_metrics_instruction=exp_metrics_instruction,
@@ -2123,7 +2195,11 @@ Generated: {_utcnow_iso()}
     (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
 
     # Validate draft quality (section balance + bullet density)
-    _validate_draft_quality(draft, stage_dir=stage_dir)
+    _validate_draft_quality(
+        draft,
+        stage_dir=stage_dir,
+        section_word_targets=_paper_section_word_targets(config),
+    )
 
     # --- HITL: Read human guidance for paper draft ---
     guidance_file = stage_dir / "hitl_guidance.md"

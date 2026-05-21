@@ -151,6 +151,28 @@ def test_validate_config_accepts_llm_wire_api_responses(tmp_path: Path):
     assert result.ok is True
 
 
+def test_load_config_reads_export_length_constraints(tmp_path: Path):
+    config_path = _write_valid_config(tmp_path)
+    raw = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        raw
+        + """
+export:
+  target_conference: neurips_2025
+  page_limit: 8
+  main_body_word_min: 3200
+  main_body_word_max: 4200
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.export.page_limit == 8
+    assert config.export.main_body_word_min == 3200
+    assert config.export.main_body_word_max == 4200
+
+
 def test_validate_config_rejects_invalid_llm_wire_api(tmp_path: Path):
     data = _valid_config_data()
     data["llm"]["wire_api"] = "responses_only"

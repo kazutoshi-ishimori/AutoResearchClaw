@@ -19,7 +19,7 @@ class _FakeLLM:
         return LLMResponse(content=self.responses[idx], model="fake-model")
 
 
-def _make_config(tmp_path: Path):
+def _make_config(tmp_path: Path, export: dict[str, Any] | None = None):
     from researchclaw.config import RCConfig
 
     data = {
@@ -46,7 +46,8 @@ def _make_config(tmp_path: Path):
             "figure_agent": {"enabled": False},
             "repair": {"enabled": False},
         },
-        "export": {"target_conference": "neurips_2025", "bib_file": "references"},
+        "export": export
+        or {"target_conference": "neurips_2025", "bib_file": "references"},
     }
     return RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
 
@@ -521,6 +522,81 @@ def test_paper_revision_falls_back_when_required_sections_disappear(tmp_path: Pa
     assert "## Results" in written
     assert report["fallback_to_draft"] is True
     assert report["missing_sections"] == ["methods", "results"]
+
+
+def test_paper_revision_allows_compact_revision_within_configured_target(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.adapters import AdapterBundle
+    from researchclaw.pipeline.stage_impls._review_publish import _execute_paper_revision
+
+    run_dir = tmp_path / "run"
+    stage16 = run_dir / "stage-16"
+    stage17 = run_dir / "stage-17"
+    stage18 = run_dir / "stage-18"
+    stage19 = run_dir / "stage-19"
+    for path in (stage16, stage17, stage18, stage19):
+        path.mkdir(parents=True)
+    (stage16 / "paper_contract.json").write_text(
+        json.dumps({"allowed_numbers": [], "available_figures": []}),
+        encoding="utf-8",
+    )
+    draft = (
+        "# Paper\n\n"
+        "## Abstract\n\n" + " ".join(["draft"] * 120) + "\n\n"
+        "## Introduction\n\n" + " ".join(["draft"] * 260) + "\n\n"
+        "## Method\n\n" + " ".join(["draft"] * 260) + "\n\n"
+        "## Results\n\n" + " ".join(["draft"] * 260) + "\n\n"
+        "## Conclusion\n\n" + " ".join(["draft"] * 120) + "\n"
+    )
+    revised = (
+        "# Paper\n\n"
+        "## Abstract\n\n" + " ".join(["revised"] * 100) + "\n\n"
+        "## Introduction\n\n" + " ".join(["revised"] * 180) + "\n\n"
+        "## Method\n\n" + " ".join(["revised"] * 180) + "\n\n"
+        "## Results\n\n" + " ".join(["revised"] * 180) + "\n\n"
+        "## Conclusion\n\n" + " ".join(["revised"] * 100) + "\n"
+    )
+    (stage17 / "paper_draft.md").write_text(draft, encoding="utf-8")
+    (stage18 / "reviews.md").write_text("Compress for page limit.", encoding="utf-8")
+    llm = _FakeLLM([revised])
+
+    _execute_paper_revision(
+        stage19,
+        run_dir,
+        _make_config(
+            tmp_path,
+            export={
+                "target_conference": "neurips_2025",
+                "bib_file": "references",
+                "page_limit": 8,
+                "main_body_word_min": 600,
+                "main_body_word_max": 900,
+            },
+        ),
+        AdapterBundle(),
+        llm=llm,  # type: ignore[arg-type]
+        prompts=None,
+    )
+
+    assert len(llm.calls) == 1
+    written = (stage19 / "paper_revised.md").read_text(encoding="utf-8")
+    assert "revised" in written
+
+
+def test_section_integrity_accepts_numbered_conference_headings() -> None:
+    from researchclaw.pipeline.paper_integrity import section_integrity_warnings
+
+    paper = (
+        "# Paper\n\n"
+        "## Abstract\n\nA short study.\n\n"
+        "## I. Introduction\n\nContext.\n\n"
+        "## III. Method\n\nMethod text.\n\n"
+        "## V. Results\n\nResult text.\n\n"
+        "## VII. Limitations and Conclusion\n\nConclusion text.\n"
+    )
+
+    assert section_integrity_warnings(paper) == []
 
 
 def test_export_publish_strips_new_citations_without_resolving_when_contract_exists(

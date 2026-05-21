@@ -23,6 +23,7 @@ def _make_run(
     model: str,
     final_status: str = "done",
     stages_done: int = 23,
+    stages_executed: int = 23,
     quality_score: float | None = None,
     pdf_score: float | None = None,
     citation_integrity: float | None = None,
@@ -41,7 +42,7 @@ def _make_run(
         run_dir / "pipeline_summary.json",
         {
             "run_id": name,
-            "stages_executed": 23,
+            "stages_executed": stages_executed,
             "stages_done": stages_done,
             "stages_failed": 0 if final_status == "done" else 1,
             "final_status": final_status,
@@ -112,6 +113,79 @@ def test_collect_run_summary_reads_model_and_quality_artifacts(tmp_path: Path) -
     assert summary["score_coverage"] > 0.7
 
 
+def test_collect_run_summary_accepts_checkpoint_only_interrupted_run(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-interrupted"
+    run_dir.mkdir()
+    (run_dir / "config.yaml").write_text(
+        "llm:\n"
+        "  provider: openai-compatible\n"
+        "  primary_model: openai/gpt-oss-120b\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run_dir / "checkpoint.json",
+        {
+            "last_completed_stage": 9,
+            "last_completed_name": "EXPERIMENT_DESIGN",
+            "run_id": "rc-interrupted",
+            "timestamp": "2026-05-20T00:00:00+00:00",
+        },
+    )
+
+    summary = collect_run_summary(run_dir)
+
+    assert summary["run_id"] == "rc-interrupted"
+    assert summary["model"] == "openai/gpt-oss-120b"
+    assert summary["final_status"] == "interrupted"
+    assert summary["stages_done"] == 9
+    assert summary["stages_executed"] == 23
+    assert "not-complete" in summary["flags"]
+
+
+def test_collect_run_summary_infers_gptoss_model_from_interrupted_run_name(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "rc-gptoss-openrouter-paper-20260520"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "checkpoint.json",
+        {
+            "last_completed_stage": 9,
+            "run_id": "rc-gptoss",
+            "timestamp": "2026-05-20T00:00:00+00:00",
+        },
+    )
+
+    summary = collect_run_summary(run_dir)
+
+    assert summary["model"] == "openai/gpt-oss-120b"
+
+
+def test_collect_run_summary_infers_deepseek_cloud_variants_from_run_name(
+    tmp_path: Path,
+) -> None:
+    cases = {
+        "rc-deepseek-v4-flash-cloud-paper-20260521": "deepseek-v4-flash:cloud",
+        "rc-deepseek-v4-pro-cloud-paper-20260521": "deepseek-v4-pro:cloud",
+    }
+
+    for run_name, expected_model in cases.items():
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        _write_json(
+            run_dir / "checkpoint.json",
+            {
+                "last_completed_stage": 9,
+                "run_id": run_name,
+                "timestamp": "2026-05-21T00:00:00+00:00",
+            },
+        )
+
+        summary = collect_run_summary(run_dir)
+
+        assert summary["model"] == expected_model
+
+
 def test_build_model_comparison_ranks_runs_and_preserves_missing_coverage(tmp_path: Path) -> None:
     weaker = _make_run(
         tmp_path,
@@ -146,6 +220,33 @@ def test_build_model_comparison_ranks_runs_and_preserves_missing_coverage(tmp_pa
     assert rows[2]["model"] == "qwen/qwen3.6-27b"
     assert rows[2]["score_coverage"] < rows[0]["score_coverage"]
     assert comparison["recommendation"]["best_model"] == "gpt-oss:120b-cloud"
+
+
+def test_low_coverage_partial_run_does_not_outrank_complete_paper_run(tmp_path: Path) -> None:
+    complete = _make_run(
+        tmp_path,
+        "run-complete",
+        model="gemma4:31b-cloud",
+        stages_done=23,
+        quality_score=8.0,
+        pdf_score=4.0,
+        citation_integrity=1.0,
+    )
+    partial = _make_run(
+        tmp_path,
+        "run-partial",
+        model="qwen/qwen3.6-27b",
+        final_status="failed",
+        stages_done=7,
+        stages_executed=8,
+    )
+
+    comparison = build_model_comparison([partial, complete])
+
+    assert comparison["runs"][0]["model"] == "gemma4:31b-cloud"
+    assert comparison["runs"][1]["model"] == "qwen/qwen3.6-27b"
+    assert comparison["runs"][1]["score_coverage"] < 0.6
+    assert comparison["runs"][1]["rank_score"] < comparison["runs"][0]["rank_score"]
 
 
 def test_render_model_comparison_markdown_includes_table_and_warnings(tmp_path: Path) -> None:

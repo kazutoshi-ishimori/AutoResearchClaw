@@ -33,6 +33,8 @@ _SECTION_ALIASES = {
     "discussion": "discussion",
     "limitations": "limitations",
     "limitation": "limitations",
+    "limitations and conclusion": "conclusion",
+    "discussion and conclusion": "conclusion",
     "conclusion": "conclusion",
     "conclusions": "conclusion",
 }
@@ -92,6 +94,7 @@ def enforce_revision_integrity(
     revised: str,
     allowed_citation_keys: set[str],
     min_word_ratio: float = 0.8,
+    min_word_count: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Strip citation drift and fall back when revision drops core sections."""
     sanitized, citation_report = strip_disallowed_citations(
@@ -104,10 +107,12 @@ def enforce_revision_integrity(
     missing_sections = sorted(required - revised_sections)
     draft_word_count = len(draft.split())
     revised_word_count = len(sanitized.split())
-    too_short = (
-        draft_word_count > 0
-        and revised_word_count < int(draft_word_count * min_word_ratio)
+    word_floor = (
+        min_word_count
+        if min_word_count is not None
+        else int(draft_word_count * min_word_ratio)
     )
+    too_short = draft_word_count > 0 and revised_word_count < word_floor
     report: dict[str, Any] = {
         "generated": _utcnow_iso(),
         "removed_citation_keys": citation_report["removed_citation_keys"],
@@ -115,6 +120,7 @@ def enforce_revision_integrity(
         "draft_word_count": draft_word_count,
         "revised_word_count": revised_word_count,
         "min_word_ratio": min_word_ratio,
+        "min_word_count": min_word_count,
         "too_short": too_short,
         "fallback_to_draft": False,
     }
@@ -229,4 +235,9 @@ def _canonical_sections(text: str) -> set[str]:
 def _normalize_heading(heading: str) -> str:
     heading = re.sub(r"[*_`]", "", heading).strip().lower()
     heading = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", heading)
+    heading = re.sub(
+        r"^(?:[ivxlcdm]+|[a-z])(?:[.)]|\s*[-:])\s+",
+        "",
+        heading,
+    )
     return heading

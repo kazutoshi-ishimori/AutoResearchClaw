@@ -504,6 +504,9 @@ class ExportConfig:
     target_conference: str = "neurips_2025"
     authors: str = "Anonymous"
     bib_file: str = "references"
+    page_limit: int = 10
+    main_body_word_min: int = 5000
+    main_body_word_max: int = 6500
 
 
 @dataclass(frozen=True)
@@ -828,6 +831,13 @@ class RCConfig:
                 target_conference=export.get("target_conference", "neurips_2025"),
                 authors=export.get("authors", "Anonymous"),
                 bib_file=export.get("bib_file", "references"),
+                page_limit=_safe_int(export.get("page_limit"), 10),
+                main_body_word_min=_safe_int(
+                    export.get("main_body_word_min"), 5000
+                ),
+                main_body_word_max=_safe_int(
+                    export.get("main_body_word_max"), 6500
+                ),
             ),
             prompts=PromptsConfig(
                 custom_file=prompts.get("custom_file", ""),

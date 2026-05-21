@@ -220,6 +220,14 @@ def _execute_peer_review(
 ) -> StageResult:
     draft = _read_prior_artifact(run_dir, "paper_draft.md") or ""
     experiment_evidence = _collect_experiment_evidence(run_dir)
+    from researchclaw.pipeline.stage_impls._paper_writing import (
+        _paper_length_instruction,
+    )
+    _length_review_contract = (
+        "\n\nCONFIGURED LENGTH CONTRACT FOR THIS RUN:\n"
+        + _paper_length_instruction(config)
+        + "Review against this configured target, not a generic 9-page paper target.\n"
+    )
 
     # Load draft quality warnings from Stage 17 (if available)
     _quality_suffix = ""
@@ -247,7 +255,7 @@ def _execute_peer_review(
             draft=draft,
             experiment_evidence=experiment_evidence,
         )
-        _review_user = sp.user + _quality_suffix
+        _review_user = sp.user + _quality_suffix + _length_review_contract
         resp = _chat_with_prompt(
             llm,
             sp.system,
@@ -334,6 +342,14 @@ def _execute_paper_revision(
                 _rev_blocks[_bname] = _pm.block(_bname)
             except (KeyError, Exception):  # noqa: BLE001
                 _rev_blocks[_bname] = ""
+        from researchclaw.pipeline.stage_impls._paper_writing import (
+            _paper_length_instruction,
+        )
+        _length_revision_contract = (
+            "\n\nCONFIGURED LENGTH CONTRACT FOR THIS RUN:\n"
+            + _paper_length_instruction(config)
+            + "Do not expand the paper beyond this configured target.\n"
+        )
         # Load draft quality directives from Stage 17
         _quality_prefix = ""
         _quality_json_path = _find_prior_file(run_dir, "draft_quality.json")
@@ -357,7 +373,12 @@ def _execute_paper_revision(
             topic_constraint=_pm.block("topic_constraint", topic=config.research.topic),
             writing_structure=_ws_revision,
             draft=draft,
-            reviews=_quality_prefix + reviews + data_integrity_revision,
+            reviews=(
+                _quality_prefix
+                + reviews
+                + data_integrity_revision
+                + _length_revision_contract
+            ),
             **_rev_blocks,
         )
         # R10-Fix2: Ensure max_tokens is sufficient for full paper revision
@@ -384,29 +405,48 @@ def _execute_paper_revision(
         )
         revised = resp.content
         revised_word_count = len(revised.split())
-        # Length guard: if revision is shorter than 80% of draft, retry once
-        if draft_word_count > 500 and revised_word_count < int(draft_word_count * 0.8):
+        _export_cfg = getattr(config, "export", None)
+        _word_min = int(getattr(_export_cfg, "main_body_word_min", 5000) or 5000)
+        _word_max = int(getattr(_export_cfg, "main_body_word_max", 6500) or 6500)
+        _page_limit = int(getattr(_export_cfg, "page_limit", 10) or 10)
+        _concise_revision = _word_max < 5000 or _page_limit < 10
+        _revision_floor = _word_min if _concise_revision else int(draft_word_count * 0.8)
+        # Length guard: standard runs preserve most draft content; concise runs
+        # instead honor the configured word budget so revision does not re-inflate.
+        if draft_word_count > 500 and revised_word_count < _revision_floor:
             logger.warning(
                 "Paper revision (%d words) is shorter than draft (%d words). "
                 "Retrying with stronger length enforcement.",
                 revised_word_count,
                 draft_word_count,
             )
-            retry_user = (
-                f"CRITICAL LENGTH REQUIREMENT: The draft is {draft_word_count} words. "
-                f"Your revision MUST be at least {draft_word_count} words — ideally longer. "
-                f"Do NOT summarize or condense ANY section. Copy each section verbatim "
-                f"and ONLY make targeted improvements to address reviewer comments. "
-                f"If a section has no reviewer comments, include it UNCHANGED.\n\n"
-                + sp.user
-            )
+            if _concise_revision:
+                retry_user = (
+                    "CRITICAL CONCISE-PAPER LENGTH REQUIREMENT: "
+                    f"The configured main body target is {_word_min}-{_word_max} words "
+                    f"and the PDF page limit is {_page_limit}. "
+                    f"Your previous revision was {revised_word_count} words, which is "
+                    f"below the configured minimum {_word_min}. Expand only enough to "
+                    "reach the configured range. Do NOT restore a long 9-page paper, "
+                    "and do NOT exceed the configured maximum.\n\n"
+                    + sp.user
+                )
+            else:
+                retry_user = (
+                    f"CRITICAL LENGTH REQUIREMENT: The draft is {draft_word_count} words. "
+                    f"Your revision MUST be at least {draft_word_count} words — ideally longer. "
+                    f"Do NOT summarize or condense ANY section. Copy each section verbatim "
+                    f"and ONLY make targeted improvements to address reviewer comments. "
+                    f"If a section has no reviewer comments, include it UNCHANGED.\n\n"
+                    + sp.user
+                )
             resp2 = _chat_with_prompt(
                 llm, sp.system, retry_user,
                 json_mode=sp.json_mode, max_tokens=revision_max_tokens,
             )
             revised2 = resp2.content
             revised2_word_count = len(revised2.split())
-            if revised2_word_count >= int(draft_word_count * 0.8):
+            if revised2_word_count >= _revision_floor:
                 revised = revised2
             elif revised2_word_count > revised_word_count:
                 # Retry improved but still not enough — use the longer version
@@ -460,6 +500,7 @@ def _execute_paper_revision(
         draft=draft,
         revised=revised,
         allowed_citation_keys=_allowed_revision_citations,
+        min_word_count=_revision_floor if _concise_revision else None,
     )
     if (
         _integrity_report.get("removed_citation_keys")
@@ -2646,7 +2687,10 @@ def _execute_export_publish(
                             _qc.warnings_summary
                         )
                     # BUG-27: Warn if page count exceeds limit
-                    _page_limit = 10
+                    _page_limit = int(
+                        getattr(getattr(config, "export", None), "page_limit", 10)
+                        or 10
+                    )
                     if _qc.page_count and _qc.page_count > _page_limit:
                         _paper_integrity_report["warnings"].append(
                             f"page_count_exceeds_limit:{_qc.page_count}>{_page_limit}"
