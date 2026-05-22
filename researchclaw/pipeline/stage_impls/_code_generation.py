@@ -414,6 +414,86 @@ def _collect_named_list_lengths(
     return found
 
 
+def _truncate_named_literal_lists(
+    code: str,
+    names: tuple[str, ...],
+    max_items: int,
+) -> tuple[str, bool]:
+    rewritten = False
+    updated = code
+    for name in names:
+        pattern = re.compile(
+            rf"(?is)(?P<prefix>"
+            rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])\s*"
+            rf"(?:=\s*|:\s*[^=\n]+=\s*)"
+            rf"|[\"']{re.escape(name)}[\"']\s*:\s*)"
+            rf"\[(?P<body>[^\]]*)\]"
+        )
+
+        def _replace(match: re.Match[str]) -> str:
+            nonlocal rewritten
+            try:
+                values = ast.literal_eval("[" + match.group("body") + "]")
+            except (SyntaxError, ValueError):
+                return match.group(0)
+            if not isinstance(values, list) or len(values) <= max_items:
+                return match.group(0)
+            rewritten = True
+            return f"{match.group('prefix')}{values[:max_items]!r}"
+
+        updated = pattern.sub(_replace, updated)
+    return updated, rewritten
+
+
+def _repair_tabular_cpu_budget_contract(
+    files: dict[str, str],
+    *,
+    topic: str,
+    experiment_mode: str,
+    network_policy: str,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Deterministically clamp simple literal lists before failing Stage 10."""
+    if experiment_mode not in ("sandbox", "docker"):
+        return files, {"rewritten": False, "changes": []}
+    if not _is_tabular_stage10_topic(topic):
+        return files, {"rewritten": False, "changes": []}
+    offline = experiment_mode == "sandbox" or network_policy == "none"
+    if not offline:
+        return files, {"rewritten": False, "changes": []}
+
+    repaired = dict(files)
+    changes: list[str] = []
+    type_lengths = _collect_named_list_lengths(repaired, ("shift_types", "shift_type"))
+    type_len = min((length for _fname, _name, length in type_lengths), default=2)
+    max_shift_types = min(type_len, 2)
+    max_shift_magnitudes = max(
+        1,
+        _TABULAR_CPU_MAX_SHIFT_REGIMES // max(1, max_shift_types),
+    )
+    for fname, code in list(repaired.items()):
+        if not fname.endswith(".py"):
+            continue
+        updated, did_types = _truncate_named_literal_lists(
+            code,
+            ("shift_types", "shift_type"),
+            max_shift_types,
+        )
+        updated, did_magnitudes = _truncate_named_literal_lists(
+            updated,
+            ("shift_magnitudes", "shift_magnitude"),
+            max_shift_magnitudes,
+        )
+        if did_types or did_magnitudes:
+            repaired[fname] = updated
+            if did_types:
+                changes.append(f"{fname}: truncated shift_types to {max_shift_types}")
+            if did_magnitudes:
+                changes.append(
+                    f"{fname}: truncated shift_magnitudes to {max_shift_magnitudes}"
+                )
+    return repaired, {"rewritten": bool(changes), "changes": changes}
+
+
 def _validate_tabular_cpu_budget_contract(
     files: dict[str, str],
     *,
@@ -1920,6 +2000,23 @@ def _execute_code_generation(
         if config.experiment.mode == "docker"
         else "none"
     )
+    files, _tabular_repair_report = _repair_tabular_cpu_budget_contract(
+        files,
+        topic=config.research.topic,
+        experiment_mode=config.experiment.mode,
+        network_policy=_contract_network_policy,
+    )
+    if _tabular_repair_report.get("rewritten"):
+        for fname, code in files.items():
+            (exp_dir / fname).write_text(code, encoding="utf-8")
+        (stage_dir / "stage10_tabular_cpu_budget_repair.json").write_text(
+            json.dumps(_tabular_repair_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info(
+            "Stage 10: applied tabular CPU budget repair: %s",
+            "; ".join(_tabular_repair_report.get("changes", [])),
+        )
     _contract_violations = _validate_stage10_data_contract(
         files,
         topic=config.research.topic,

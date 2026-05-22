@@ -14,6 +14,7 @@ from researchclaw.pipeline.stage_impls._code_generation import (
     _Stage10TimeoutError,
     _execute_code_generation,
     _run_with_stage10_timeout,
+    _repair_tabular_cpu_budget_contract,
     _stage10_data_contract_guidance,
     _stage10_runnable_metric_guidance,
     _stage10_tabular_cpu_budget_guidance,
@@ -245,6 +246,35 @@ def test_stage10_tabular_cpu_budget_contract_rejects_heavy_literals() -> None:
     assert "tabular_cpu_budget_n_estimators" in categories
     assert "tabular_cpu_budget_seeds" in categories
     assert "tabular_cpu_budget_shift_regimes" in categories
+
+
+def test_stage10_tabular_cpu_budget_repair_clamps_shift_regime_literals() -> None:
+    files = {
+        "main.py": (
+            "HYPERPARAMETERS = {\n"
+            "    'shift_types': ['linear', 'non_linear'],\n"
+            "    'shift_magnitudes': [0.0, 0.5, 1.0, 2.0],\n"
+            "}\n"
+            "def split_cp_baseline():\n"
+            "    return {'coverage_rate': 0.9}\n"
+        )
+    }
+
+    repaired, report = _repair_tabular_cpu_budget_contract(
+        files,
+        topic="Conformal prediction for tabular classification under covariate shift",
+        experiment_mode="sandbox",
+        network_policy="none",
+    )
+
+    assert report["rewritten"] is True
+    assert "'shift_magnitudes': [0.0, 0.5]" in repaired["main.py"]
+    assert _validate_tabular_cpu_budget_contract(
+        repaired,
+        topic="Conformal prediction for tabular classification under covariate shift",
+        experiment_mode="sandbox",
+        network_policy="none",
+    ) == []
 
 
 def test_stage10_tabular_cpu_budget_contract_allows_small_literals() -> None:
