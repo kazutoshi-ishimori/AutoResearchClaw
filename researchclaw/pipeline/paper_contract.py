@@ -20,8 +20,6 @@ from researchclaw.pipeline.verified_registry import VerifiedRegistry
 _STRICT_MARKDOWN_HEADINGS = {
     "results",
     "main results",
-    "experiments",
-    "experimental setup",
     "experimental results",
     "evaluation",
     "ablation",
@@ -47,12 +45,22 @@ def build_paper_contract(
         metric_direction=metric_direction,
         best_only=True,
     )
+    claim_ledger = build_claim_ledger(run_dir)
+    claim_conditions = {
+        str(claim.get("condition"))
+        for claim in (
+            claim_ledger.get("valid_metric_claims", [])
+            + claim_ledger.get("invalid_metric_claims", [])
+        )
+        if isinstance(claim, dict) and claim.get("condition")
+    }
     allowed_numbers = sorted(
         {
             round(float(value), 8)
             for value in registry.values
             if math.isfinite(float(value))
         }
+        | _condition_literal_numbers(set(registry.condition_names) | claim_conditions)
     )
     available_figures = _collect_available_figures(run_dir)
     contract: dict[str, Any] = {
@@ -64,7 +72,7 @@ def build_paper_contract(
         "allowed_conditions": sorted(registry.condition_names),
         "allowed_numbers": allowed_numbers,
         "available_figures": available_figures,
-        "claim_ledger": build_claim_ledger(run_dir),
+        "claim_ledger": claim_ledger,
         "rules": {
             "numbers": "only_allowed_numbers",
             "conditions": "only_allowed_conditions",
@@ -102,6 +110,9 @@ def load_paper_contract(run_dir: Path) -> dict[str, Any]:
         if isinstance(loaded, dict):
             if "claim_ledger" not in loaded:
                 loaded["claim_ledger"] = build_claim_ledger(run_dir)
+            loaded["allowed_numbers"] = _augment_allowed_numbers_from_contract(
+                loaded,
+            )
             return loaded
     return {}
 
@@ -506,6 +517,34 @@ def _load_experiment_summary(run_dir: Path) -> dict[str, Any]:
     return {}
 
 
+def _condition_literal_numbers(conditions: set[str]) -> set[float]:
+    numbers: set[float] = set()
+    for condition in conditions:
+        for match in re.finditer(r"(?<![A-Za-z])(\d+(?:\.\d+)?)(?![A-Za-z])", condition):
+            value = _to_float(match.group(1))
+            if value is not None:
+                numbers.add(round(value, 8))
+    return numbers
+
+
+def _augment_allowed_numbers_from_contract(contract: dict[str, Any]) -> list[float]:
+    existing = {
+        round(float(value), 8)
+        for value in contract.get("allowed_numbers", [])
+        if isinstance(value, (int, float)) and math.isfinite(float(value))
+    }
+    conditions = {str(c) for c in contract.get("allowed_conditions", []) if c}
+    ledger = contract.get("claim_ledger")
+    if isinstance(ledger, dict):
+        for claim in (
+            ledger.get("valid_metric_claims", [])
+            + ledger.get("invalid_metric_claims", [])
+        ):
+            if isinstance(claim, dict) and claim.get("condition"):
+                conditions.add(str(claim["condition"]))
+    return sorted(existing | _condition_literal_numbers(conditions))
+
+
 def _parse_metric_path(path: str) -> tuple[str, str] | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) < 2:
@@ -629,12 +668,19 @@ def _claim_ledger_line_matches(
         if not isinstance(claim, dict):
             continue
         metric = str(claim.get("metric") or "")
-        if not any(phrase in lowered for phrase in _metric_text_phrases(metric)):
+        phrase_spans = _metric_phrase_spans(lowered, metric)
+        if not phrase_spans:
             continue
         claim_value = _to_float(claim.get("value"))
         if claim_value is None:
             continue
         for match in _NUMBER_RE.finditer(line):
+            if not _number_is_scoped_to_metric_phrase(
+                lowered,
+                match.start(1),
+                phrase_spans,
+            ):
+                continue
             num_str = match.group(1)
             try:
                 value = float(num_str)
@@ -660,6 +706,50 @@ def _metric_text_phrases(metric: str) -> set[str]:
             }
         )
     return {phrase for phrase in phrases if phrase}
+
+
+def _metric_phrase_spans(line_lower: str, metric: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for phrase in _metric_text_phrases(metric):
+        start = 0
+        while True:
+            idx = line_lower.find(phrase, start)
+            if idx < 0:
+                break
+            spans.append((idx, idx + len(phrase)))
+            start = idx + len(phrase)
+    return spans
+
+
+def _number_is_scoped_to_metric_phrase(
+    line_lower: str,
+    number_start: int,
+    phrase_spans: list[tuple[int, int]],
+    *,
+    max_distance: int = 80,
+) -> bool:
+    for _start, end in phrase_spans:
+        between = line_lower[end:number_start]
+        if (
+            end <= number_start
+            and number_start - end <= max_distance
+            and not _contains_other_metric_phrase(between)
+        ):
+            return True
+    return False
+
+
+def _contains_other_metric_phrase(text: str) -> bool:
+    blockers = (
+        "coverage rate",
+        "coverage gap",
+        "accuracy",
+        "runtime",
+        "latency",
+        "seed",
+        "lambda",
+    )
+    return any(blocker in text for blocker in blockers)
 
 
 def _is_same_claim_value(value: float, claim_value: float, tolerance: float) -> bool:
@@ -690,11 +780,13 @@ def _markdown_heading(line: str) -> str | None:
 def _strip_citations_and_links(line: str) -> str:
     """Remove citation/link spans while preserving other numeric claims."""
     line = re.sub(r"\[[^\]]+\]\([^)]+\)", "", line)
+    line = re.sub(r"\b(?:Figure|Fig\.|Table|Section)\s+\d+(?:\.\d+)?", "", line)
     line = re.sub(
         r"\[[a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z0-9_-]*(?:\s*[,;]\s*[a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z0-9_-]*)*\]",
         "",
         line,
     )
+    line = re.sub(r"\b[A-Za-z][A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*\b", "", line)
     return line
 
 

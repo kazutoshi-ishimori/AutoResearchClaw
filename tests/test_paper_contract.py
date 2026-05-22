@@ -77,6 +77,12 @@ def _write_conformal_summary_without_baseline(run_dir: Path) -> None:
                 "max": 1.9331,
                 "count": 3,
             },
+            "marginal_covariate_0.7/coverage_rate": {
+                "mean": 0.8941,
+                "min": 0.8941,
+                "max": 0.8941,
+                "count": 3,
+            },
         },
         "condition_summaries": {
             "marginal_covariate_0.5": {
@@ -141,6 +147,7 @@ def test_build_paper_contract_excludes_invalid_conformal_set_size_claims(
         "value": 1.7672,
         "count": 3,
     } in ledger["valid_metric_claims"]
+    assert 0.5 in contract["allowed_numbers"]
 
 
 def test_render_paper_contract_instruction_forbids_comparative_claims_without_baseline(
@@ -187,6 +194,7 @@ def test_load_paper_contract_backfills_missing_claim_ledger(tmp_path: Path) -> N
 
     assert "claim_ledger" in contract
     assert contract["claim_ledger"]["invalid_metric_claims"]
+    assert 0.7 in contract["allowed_numbers"]
 
 
 def test_render_paper_contract_instruction_is_strict_about_evidence(tmp_path: Path) -> None:
@@ -276,6 +284,76 @@ def test_contract_violation_detection_does_not_treat_small_integers_as_invalid_m
 ## Results
 
 The average set size analysis is reported in Table -1 and Figure -5.
+"""
+
+    violations = find_paper_contract_violations(paper, contract)
+
+    assert violations == []
+
+
+def test_contract_violation_detection_scopes_invalid_metric_to_nearby_value(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import (
+        build_paper_contract,
+        find_paper_contract_violations,
+    )
+
+    run_dir = tmp_path / "run"
+    _write_conformal_summary_without_baseline(run_dir)
+    contract = build_paper_contract(run_dir, metric_direction="minimize")
+    paper = """
+## Results
+
+The coverage rate was 0.9061 and the average set size was 1.7672.
+"""
+
+    violations = find_paper_contract_violations(paper, contract)
+
+    assert violations == []
+
+
+def test_contract_violation_detection_stops_scope_at_other_metric_phrase(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import (
+        build_paper_contract,
+        find_paper_contract_violations,
+    )
+
+    run_dir = tmp_path / "run"
+    _write_conformal_summary_without_baseline(run_dir)
+    contract = build_paper_contract(run_dir, metric_direction="minimize")
+    paper = """
+## Results
+
+S-CP-C0.5 has an average set size of 1.7672, while S-CP-M0.7 has a coverage rate of 0.8941 and a set size of 1.7672.
+"""
+
+    violations = find_paper_contract_violations(paper, contract)
+
+    assert violations == []
+
+
+def test_contract_violation_detection_ignores_setup_and_figure_reference_numbers(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import (
+        build_paper_contract,
+        find_paper_contract_violations,
+    )
+
+    run_dir = tmp_path / "run"
+    _write_conformal_summary_without_baseline(run_dir)
+    contract = build_paper_contract(run_dir, metric_direction="minimize")
+    paper = """
+## Experiments
+
+The synthetic benchmark has 20 features and uses a window of 100 samples.
+
+## Results
+
+As shown in Figure 6 and Table 3, the severe condition has lambda 0.7.
 """
 
     violations = find_paper_contract_violations(paper, contract)
