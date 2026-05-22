@@ -1829,6 +1829,27 @@ class TestWritePaperSections:
         assert "sections written so far" in llm.user_prompts[1]
         assert "completing a paper" in llm.user_prompts[2]
 
+    def test_real_metrics_instruction_preserves_contract_blocks(self) -> None:
+        merged = rc_executor._paper_metrics_instruction_with_real_data(
+            "\n\n## PAPER CONTRACT\nstrict\n\n## CLAIM LEDGER\nledger"
+        )
+
+        assert "Use the ACTUAL experiment results" in merged
+        assert "## PAPER CONTRACT" in merged
+        assert "## CLAIM LEDGER" in merged
+
+    def test_condition_summary_metric_lines_omit_invalid_set_sizes(self) -> None:
+        lines = rc_executor._format_condition_summary_metric_lines(
+            {
+                "average_prediction_set_size": 0.9061,
+                "coverage_rate": 0.9061,
+            }
+        )
+
+        assert "- coverage_rate: 0.9061" in lines
+        assert "average_prediction_set_size: 0.9061" not in lines
+        assert "omitted invalid metric claim" in lines
+
 
 class TestLoadHardwareProfile:
     """Tests for _load_hardware_profile()."""

@@ -64,6 +64,7 @@ def build_paper_contract(
         "allowed_conditions": sorted(registry.condition_names),
         "allowed_numbers": allowed_numbers,
         "available_figures": available_figures,
+        "claim_ledger": build_claim_ledger(run_dir),
         "rules": {
             "numbers": "only_allowed_numbers",
             "conditions": "only_allowed_conditions",
@@ -99,6 +100,8 @@ def load_paper_contract(run_dir: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, OSError):
             continue
         if isinstance(loaded, dict):
+            if "claim_ledger" not in loaded:
+                loaded["claim_ledger"] = build_claim_ledger(run_dir)
             return loaded
     return {}
 
@@ -130,7 +133,152 @@ def render_paper_contract_instruction(contract: dict[str, Any]) -> str:
         "or omit the claim.\n"
         "- Tables must use only verified conditions and allowed numeric values. "
         "Use `--` for unsupported cells.\n"
+        + _render_claim_ledger_instruction(contract.get("claim_ledger"))
     )
+
+
+def build_claim_ledger(run_dir: Path) -> dict[str, Any]:
+    """Build metric-specific evidence rules for paper claims.
+
+    ``allowed_numbers`` is intentionally broad because the same value can be
+    valid for one metric and impossible for another.  The claim ledger keeps
+    the metric context so the writer can avoid plausible but invalid claims.
+    """
+    summary = _load_experiment_summary(run_dir)
+    metrics_summary = summary.get("metrics_summary", {})
+    condition_summaries = summary.get("condition_summaries", {})
+    raw_claims: dict[tuple[str, str], dict[str, Any]] = {}
+
+    if isinstance(metrics_summary, dict):
+        for key, payload in metrics_summary.items():
+            parsed = _parse_metric_path(str(key))
+            if parsed is None or not isinstance(payload, dict):
+                continue
+            condition, metric = parsed
+            value = _to_float(payload.get("mean"))
+            if value is None:
+                value = _to_float(payload.get("value"))
+            if value is None:
+                continue
+            raw_claims[(condition, metric)] = {
+                "condition": condition,
+                "metric": metric,
+                "value": round(value, 4),
+                "count": int(payload.get("count") or 1),
+            }
+
+    if isinstance(condition_summaries, dict):
+        for condition, payload in condition_summaries.items():
+            if not isinstance(payload, dict):
+                continue
+            metrics = payload.get("metrics")
+            if not isinstance(metrics, dict):
+                continue
+            count = int(payload.get("n_seeds") or payload.get("n_seed_metrics") or 1)
+            for metric, value_raw in metrics.items():
+                value = _to_float(value_raw)
+                if value is None:
+                    continue
+                raw_claims.setdefault(
+                    (str(condition), str(metric)),
+                    {
+                        "condition": str(condition),
+                        "metric": str(metric),
+                        "value": round(value, 4),
+                        "count": count,
+                    },
+                )
+
+    valid_claims: list[dict[str, Any]] = []
+    invalid_claims: list[dict[str, Any]] = []
+    for claim in sorted(
+        raw_claims.values(),
+        key=lambda item: (str(item["condition"]), str(item["metric"])),
+    ):
+        reason = _invalid_metric_reason(str(claim["metric"]), float(claim["value"]))
+        if reason:
+            invalid_claims.append({**claim, "reason": reason})
+        else:
+            valid_claims.append(claim)
+
+    conditions = sorted({str(claim["condition"]) for claim in raw_claims.values()})
+    baseline_conditions = [
+        condition for condition in conditions if _looks_like_baseline(condition)
+    ]
+    comparative_policy = (
+        "allow_verified_baseline_comparisons"
+        if baseline_conditions
+        else "forbid_percentage_improvement_claims"
+    )
+    return {
+        "version": 1,
+        "generated": _utcnow_iso(),
+        "valid_metric_claims": valid_claims,
+        "invalid_metric_claims": invalid_claims,
+        "baseline_conditions": baseline_conditions,
+        "comparative_claim_policy": comparative_policy,
+        "rules": [
+            "Use only valid_metric_claims in results tables.",
+            "Do not report invalid_metric_claims as empirical findings.",
+            "Do not claim percentage improvements without a verified baseline condition.",
+            "Condition names are experimental regimes, not method names, unless labelled as baselines.",
+        ],
+    }
+
+
+def metric_claim_invalid_reason(metric: str, value: float) -> str | None:
+    """Return a deterministic reason when a metric-value pair is not publishable."""
+    return _invalid_metric_reason(metric, value)
+
+
+def _render_claim_ledger_instruction(ledger: Any) -> str:
+    if not isinstance(ledger, dict):
+        return ""
+    valid = ledger.get("valid_metric_claims") or []
+    invalid = ledger.get("invalid_metric_claims") or []
+    baseline_conditions = ledger.get("baseline_conditions") or []
+    policy = str(ledger.get("comparative_claim_policy") or "")
+
+    lines = [
+        "\n## CLAIM LEDGER (METRIC-SPECIFIC HARD CONSTRAINT)",
+        "Use this ledger for tables and result claims; it is stricter than the raw number list.",
+    ]
+    if policy == "forbid_percentage_improvement_claims":
+        lines.append(
+            "- Do NOT claim percentage improvements, reductions, or superiority over a baseline; no verified baseline condition exists."
+        )
+    else:
+        lines.append(
+            "- Comparative claims are allowed only against verified baseline conditions: "
+            + ", ".join(str(c) for c in baseline_conditions)
+        )
+    if valid:
+        lines.append("- Valid metric claims for results tables:")
+        for claim in valid[:60]:
+            lines.append(
+                "  - "
+                f"{claim.get('condition')}/{claim.get('metric')}="
+                f"{_format_number(claim.get('value'))}"
+                f" (n={claim.get('count', 1)})"
+            )
+        if len(valid) > 60:
+            lines.append(f"  - ... ({len(valid)} total valid metric claims)")
+    if invalid:
+        lines.append("- Invalid metric claims to omit or mark not evaluated:")
+        for claim in invalid[:30]:
+            reason = str(claim.get("reason") or "invalid_metric_claim")
+            lines.append(
+                "  - "
+                f"{claim.get('condition')}/{claim.get('metric')}="
+                f"{_format_number(claim.get('value'))}: "
+                f"{_human_invalid_reason(reason)}"
+            )
+        if len(invalid) > 30:
+            lines.append(f"  - ... ({len(invalid)} total invalid metric claims)")
+    lines.append(
+        "- Do not use experimental regime names as method names in tables; label the column as Condition or Regime."
+    )
+    return "\n".join(lines) + "\n"
 
 
 def find_paper_contract_violations(
@@ -158,6 +306,14 @@ def find_paper_contract_violations(
         if not in_strict:
             continue
         check_line = _strip_citations_and_links(line)
+        violations.extend(
+            _claim_ledger_line_violations(
+                check_line,
+                contract,
+                line_no=line_no,
+                tolerance=tolerance,
+            )
+        )
         for match in _NUMBER_RE.finditer(check_line):
             num_str = match.group(1)
             try:
@@ -210,6 +366,13 @@ def sanitize_paper_contract_violations(
             continue
 
         replacements: list[tuple[tuple[int, int], str]] = []
+        replacements.extend(
+            _claim_ledger_line_replacements(
+                line,
+                contract,
+                tolerance=tolerance,
+            )
+        )
         for match in _NUMBER_RE.finditer(line):
             num_str = match.group(1)
             try:
@@ -218,7 +381,8 @@ def sanitize_paper_contract_violations(
                 continue
             if _is_allowed_number(value, allowed, tolerance):
                 continue
-            replacements.append((match.span(1), num_str))
+            if not any(match.span(1) == span for span, _ in replacements):
+                replacements.append((match.span(1), num_str))
 
         if not replacements:
             sanitized_lines.append(line)
@@ -325,6 +489,177 @@ def _collect_available_figures(run_dir: Path) -> list[str]:
         if figures:
             break
     return figures
+
+
+def _load_experiment_summary(run_dir: Path) -> dict[str, Any]:
+    candidates = [run_dir / "experiment_summary_best.json"]
+    candidates.extend(sorted(run_dir.glob("stage-14*/experiment_summary.json"), reverse=True))
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+    return {}
+
+
+def _parse_metric_path(path: str) -> tuple[str, str] | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return None
+    metric = parts[-1]
+    condition_parts = parts[:-1]
+    if condition_parts and condition_parts[-1].isdigit():
+        # Skip raw per-seed claims; paper tables should use aggregate rows.
+        return None
+    condition = "/".join(condition_parts)
+    if not condition:
+        return None
+    return condition, metric
+
+
+def _to_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _invalid_metric_reason(metric: str, value: float) -> str | None:
+    normalized = metric.lower().replace("-", "_")
+    if normalized in {
+        "average_prediction_set_size",
+        "avg_prediction_set_size",
+        "average_set_size",
+        "avg_set_size",
+        "set_size",
+    } and value < 1.0:
+        return "prediction_set_size_below_one"
+    if normalized in {"coverage", "coverage_rate", "conditional_coverage"} and not (
+        0.0 <= value <= 1.0
+    ):
+        return "coverage_out_of_unit_interval"
+    if normalized in {"coverage_gap", "absolute_coverage_gap"} and not (
+        0.0 <= value <= 1.0
+    ):
+        return "coverage_gap_out_of_unit_interval"
+    return None
+
+
+def _human_invalid_reason(reason: str) -> str:
+    if reason == "prediction_set_size_below_one":
+        return "prediction set size below 1.0 is invalid for classification prediction sets"
+    if reason == "coverage_out_of_unit_interval":
+        return "coverage must be between 0 and 1"
+    if reason == "coverage_gap_out_of_unit_interval":
+        return "coverage gap must be between 0 and 1"
+    return reason.replace("_", " ")
+
+
+def _looks_like_baseline(condition: str) -> bool:
+    lowered = condition.lower()
+    return any(
+        token in lowered
+        for token in ("baseline", "control", "split", "vanilla", "standard")
+    )
+
+
+def _claim_ledger_line_violations(
+    line: str,
+    contract: dict[str, Any],
+    *,
+    line_no: int,
+    tolerance: float,
+) -> list[str]:
+    violations: list[str] = []
+    for span, value, claim in _claim_ledger_line_matches(
+        line,
+        contract,
+        tolerance=tolerance,
+    ):
+        _ = span
+        metric = claim.get("metric", "metric")
+        condition = claim.get("condition", "condition")
+        reason = _human_invalid_reason(str(claim.get("reason", "invalid_metric_claim")))
+        violations.append(
+            f"line {line_no}: invalid metric claim {condition}/{metric}={value} ({reason})"
+        )
+    return violations
+
+
+def _claim_ledger_line_replacements(
+    line: str,
+    contract: dict[str, Any],
+    *,
+    tolerance: float,
+) -> list[tuple[tuple[int, int], str]]:
+    return [
+        (span, value)
+        for span, value, _claim in _claim_ledger_line_matches(
+            line,
+            contract,
+            tolerance=tolerance,
+        )
+    ]
+
+
+def _claim_ledger_line_matches(
+    line: str,
+    contract: dict[str, Any],
+    *,
+    tolerance: float,
+) -> list[tuple[tuple[int, int], str, dict[str, Any]]]:
+    ledger = contract.get("claim_ledger")
+    if not isinstance(ledger, dict):
+        return []
+    invalid = ledger.get("invalid_metric_claims") or []
+    if not invalid:
+        return []
+    lowered = line.lower().replace("_", " ")
+    matches: list[tuple[tuple[int, int], str, dict[str, Any]]] = []
+    for claim in invalid:
+        if not isinstance(claim, dict):
+            continue
+        metric = str(claim.get("metric") or "")
+        if not any(phrase in lowered for phrase in _metric_text_phrases(metric)):
+            continue
+        claim_value = _to_float(claim.get("value"))
+        if claim_value is None:
+            continue
+        for match in _NUMBER_RE.finditer(line):
+            num_str = match.group(1)
+            try:
+                value = float(num_str)
+            except ValueError:
+                continue
+            if _is_allowed_number(value, {claim_value}, tolerance):
+                matches.append((match.span(1), num_str, claim))
+    return matches
+
+
+def _metric_text_phrases(metric: str) -> set[str]:
+    normalized = metric.lower().replace("_", " ").replace("-", " ").strip()
+    phrases = {normalized}
+    compact = normalized.replace(" ", "_")
+    phrases.add(compact)
+    if "set size" in normalized:
+        phrases.update(
+            {
+                "set size",
+                "prediction set size",
+                "average set size",
+                "average prediction set size",
+            }
+        )
+    return {phrase for phrase in phrases if phrase}
 
 
 def _format_number(value: Any) -> str:

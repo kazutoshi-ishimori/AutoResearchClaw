@@ -153,6 +153,8 @@ from researchclaw.pipeline.stage_impls._paper_writing import (  # noqa: E402
     _execute_paper_outline,
     _execute_paper_draft,
     _collect_raw_experiment_metrics,
+    _format_condition_summary_metric_lines,
+    _paper_metrics_instruction_with_real_data,
     _write_paper_sections,
     _validate_draft_quality,
     _review_compiled_pdf,

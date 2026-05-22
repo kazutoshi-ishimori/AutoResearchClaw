@@ -33,6 +33,7 @@ from researchclaw.pipeline._helpers import (
 )
 from researchclaw.pipeline.paper_contract import (
     load_paper_contract,
+    metric_claim_invalid_reason,
     repair_paper_contract_violations,
     render_paper_contract_instruction,
     write_paper_contract,
@@ -105,6 +106,35 @@ def _section_target_text(
     return f"{label or section.title()} ({lo}-{hi} words)"
 
 
+def _paper_metrics_instruction_with_real_data(existing: str = "") -> str:
+    """Add real-metrics guidance without dropping stricter evidence contracts."""
+    real_metrics_block = (
+        "\n\nIMPORTANT: Use the ACTUAL experiment results provided in the context. "
+        "All numbers in the Results and Experiments sections MUST reference real data. "
+        "Do NOT write 'no quantitative results yet' or use placeholder numbers. "
+        "Cite specific metrics with their actual values.\n"
+    )
+    return real_metrics_block + (existing or "")
+
+
+def _format_condition_summary_metric_lines(metrics: dict[str, Any]) -> str:
+    """Render only publishable condition-summary metrics for paper prompts."""
+    lines: list[str] = []
+    omitted: list[str] = []
+    for mk, mv in sorted(metrics.items()):
+        if isinstance(mv, (int, float)) and math.isfinite(float(mv)):
+            reason = metric_claim_invalid_reason(str(mk), float(mv))
+            if reason:
+                omitted.append(f"{mk}={mv} ({reason})")
+                continue
+            lines.append(f"- {mk}: {float(mv):.4f}")
+        else:
+            lines.append(f"- {mk}: {mv}")
+    for item in omitted:
+        lines.append(f"- omitted invalid metric claim: {item}")
+    return "\n".join(lines)
+
+
 def _topic_is_literature_first(config: RCConfig) -> bool:
     """Return True when the topic is a survey/review or the project uses docs-first mode.
 
@@ -133,13 +163,21 @@ def _execute_paper_outline(
     artifacts = ["outline.md"]
     evidence_refs = ["stage-16/outline.md"]
     try:
-        write_paper_contract(
+        _contract = write_paper_contract(
             stage_dir,
             run_dir,
             metric_direction=config.experiment.metric_direction,
         )
         artifacts.append("paper_contract.json")
         evidence_refs.append("stage-16/paper_contract.json")
+        _claim_ledger = _contract.get("claim_ledger") if isinstance(_contract, dict) else None
+        if isinstance(_claim_ledger, dict):
+            (stage_dir / "claim_ledger.json").write_text(
+                json.dumps(_claim_ledger, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            artifacts.append("claim_ledger.json")
+            evidence_refs.append("stage-16/claim_ledger.json")
     except Exception as exc:  # noqa: BLE001
         logger.debug("Stage 16: paper contract generation skipped: %s", exc)
 
@@ -1421,11 +1459,8 @@ def _execute_paper_draft(
                 logger.warning("Stage 17: Failed to build VerifiedRegistry: %s", _vr_exc)
         if isinstance(exp_summary, dict) and exp_summary.get("metrics_summary"):
             has_real_metrics = True
-            exp_metrics_instruction = (
-                "\n\nIMPORTANT: Use the ACTUAL experiment results provided in the context. "
-                "All numbers in the Results and Experiments sections MUST reference real data. "
-                "Do NOT write 'no quantitative results yet' or use placeholder numbers. "
-                "Cite specific metrics with their actual values.\n"
+            exp_metrics_instruction = _paper_metrics_instruction_with_real_data(
+                exp_metrics_instruction
             )
 
     # Collect raw experiment stdout metrics as hard constraint for the paper
@@ -1500,11 +1535,9 @@ def _execute_paper_draft(
                             cond_block += f"- Bootstrap 95% CI: [{ci_lo}, {ci_hi}]\n"
                     cm = cdata.get("metrics") or {}
                     if isinstance(cm, dict) and cm:
-                        for mk, mv in sorted(cm.items()):
-                            if isinstance(mv, (int, float)):
-                                cond_block += f"- {mk}: {mv:.4f}\n"
-                            else:
-                                cond_block += f"- {mk}: {mv}\n"
+                        rendered_metrics = _format_condition_summary_metric_lines(cm)
+                        if rendered_metrics:
+                            cond_block += rendered_metrics + "\n"
                 exp_metrics_instruction += cond_block
 
             # R18-1: Inject paired statistical comparisons

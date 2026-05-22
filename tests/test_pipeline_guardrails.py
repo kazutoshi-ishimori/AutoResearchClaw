@@ -185,9 +185,12 @@ def test_paper_outline_writes_paper_contract(tmp_path: Path) -> None:
     )
 
     contract = json.loads((stage16 / "paper_contract.json").read_text(encoding="utf-8"))
+    ledger = json.loads((stage16 / "claim_ledger.json").read_text(encoding="utf-8"))
     assert result.status is not None
     assert "paper_contract.json" in result.artifacts
+    assert "claim_ledger.json" in result.artifacts
     assert contract["allowed_conditions"] == ["Baseline", "Proposed"]
+    assert ledger["baseline_conditions"] == ["Baseline"]
     assert 0.81 in contract["allowed_numbers"]
 
 
