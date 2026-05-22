@@ -640,7 +640,7 @@ def _claim_ledger_line_matches(
                 value = float(num_str)
             except ValueError:
                 continue
-            if _is_allowed_number(value, {claim_value}, tolerance):
+            if _is_same_claim_value(value, claim_value, tolerance):
                 matches.append((match.span(1), num_str, claim))
     return matches
 
@@ -660,6 +660,14 @@ def _metric_text_phrases(metric: str) -> set[str]:
             }
         )
     return {phrase for phrase in phrases if phrase}
+
+
+def _is_same_claim_value(value: float, claim_value: float, tolerance: float) -> bool:
+    if not math.isfinite(value) or not math.isfinite(claim_value):
+        return False
+    if claim_value == 0.0:
+        return abs(value) < 1e-9
+    return abs(value - claim_value) / max(abs(claim_value), 1e-9) <= tolerance
 
 
 def _format_number(value: Any) -> str:

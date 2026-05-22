@@ -261,6 +261,28 @@ The marginal regime achieved an average prediction set size of 0.9061.
     assert report["replacement_count"] == 1
 
 
+def test_contract_violation_detection_does_not_treat_small_integers_as_invalid_metric_values(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import (
+        build_paper_contract,
+        find_paper_contract_violations,
+    )
+
+    run_dir = tmp_path / "run"
+    _write_conformal_summary_without_baseline(run_dir)
+    contract = build_paper_contract(run_dir, metric_direction="minimize")
+    paper = """
+## Results
+
+The average set size analysis is reported in Table -1 and Figure -5.
+"""
+
+    violations = find_paper_contract_violations(paper, contract)
+
+    assert violations == []
+
+
 def test_contract_violation_detection_still_checks_lines_with_citations(tmp_path: Path) -> None:
     from researchclaw.pipeline.paper_contract import (
         build_paper_contract,
