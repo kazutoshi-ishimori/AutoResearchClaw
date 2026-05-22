@@ -135,6 +135,19 @@ _TABULAR_CPU_MAX_SAMPLES = 5000
 _TABULAR_CPU_MAX_ESTIMATORS = 50
 _TABULAR_CPU_MAX_SHIFT_REGIMES = 4
 _TABULAR_CPU_SEED_COUNT = 3
+_TABULAR_CONFORMAL_REQUIRED_BASELINE = {
+    "name": "split_cp_baseline",
+    "description": (
+        "standard Split Conformal Prediction using the same base classifier, "
+        "calibration split, seeds, and shift regimes as the proposed method"
+    ),
+    "role": "reference",
+    "required_metrics": [
+        "coverage_rate",
+        "coverage_gap",
+        "average_prediction_set_size",
+    ],
+}
 
 
 def _profile_id(domain_profile: Any | None) -> str:
@@ -246,6 +259,12 @@ def _stage9_tabular_cpu_budget_guidance(
         "magnitudes.\n"
         "- Use seeds = 3 exactly. Report mean and standard deviation across "
         "those seeds.\n"
+        "- Include a required baseline named `split_cp_baseline`: standard "
+        "Split Conformal Prediction using the same base classifier, "
+        "calibration split, seeds, and shift regimes as the proposed method.\n"
+        "- The plan MUST report coverage_rate, coverage_gap, and "
+        "average_prediction_set_size for both `split_cp_baseline` and the "
+        "proposed method in every shift regime.\n"
         "- Prefer numpy/pandas/sklearn/scipy implementations and avoid any "
         "network download or GPU requirement.\n"
     )
@@ -428,6 +447,20 @@ def _rewrite_tabular_cpu_budget_value(value: Any) -> tuple[Any, bool]:
     return value, False
 
 
+def _has_split_cp_baseline(items: Any) -> bool:
+    text = _flatten_guardrail_text(items).lower()
+    return any(
+        marker in text
+        for marker in (
+            "split_cp_baseline",
+            "split cp",
+            "split-cp",
+            "split conformal",
+            "standard conformal",
+        )
+    )
+
+
 def _apply_tabular_cpu_budget_constraints(
     plan: dict[str, Any],
     *,
@@ -456,6 +489,14 @@ def _apply_tabular_cpu_budget_constraints(
     constrained, rewritten = _rewrite_tabular_cpu_budget_value(plan)
     if not isinstance(constrained, dict):
         constrained = dict(plan)
+
+    baselines = _normalize_plan_field(constrained.get("baselines"))
+    required_baselines: list[str] = []
+    if not _has_split_cp_baseline(baselines):
+        baselines.insert(0, dict(_TABULAR_CONFORMAL_REQUIRED_BASELINE))
+        constrained["baselines"] = baselines
+        required_baselines.append("split_cp_baseline")
+        rewritten = True
 
     regime_factors = constrained.get("regime_factors")
     if isinstance(regime_factors, dict):
@@ -524,6 +565,16 @@ def _apply_tabular_cpu_budget_constraints(
         f"code with N<={_TABULAR_CPU_MAX_SAMPLES}; do not download external data."
     )
     sandbox_execution["allowed_libraries"] = ["numpy", "pandas", "sklearn", "scipy"]
+    sandbox_execution["required_baselines"] = [
+        {
+            "name": "split_cp_baseline",
+            "metrics": [
+                "coverage_rate",
+                "coverage_gap",
+                "average_prediction_set_size",
+            ],
+        }
+    ]
 
     if not constrained.get("metrics"):
         constrained["metrics"] = [
@@ -534,6 +585,7 @@ def _apply_tabular_cpu_budget_constraints(
         ]
         rewritten = True
     report["rewritten"] = rewritten
+    report["required_baselines"] = required_baselines or ["split_cp_baseline"]
     if rewritten:
         report["warnings"].append(
             "Tabular synthetic sandbox plan was constrained to local CPU "

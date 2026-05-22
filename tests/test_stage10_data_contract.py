@@ -256,6 +256,7 @@ def test_stage10_tabular_cpu_budget_contract_allows_small_literals() -> None:
             "shift_magnitudes = [0.2, 0.5]\n"
         ),
         "models.py": "model = GradientBoostingClassifier(n_estimators=50)\n",
+        "baseline.py": "def split_cp_baseline():\n    return {'coverage_rate': 0.9}\n",
     }
 
     violations = _validate_tabular_cpu_budget_contract(
@@ -279,6 +280,27 @@ def test_stage10_tabular_cpu_budget_guidance_mentions_exact_limits() -> None:
     assert "n_estimators <= 50" in guidance
     assert "shift regimes <= 4" in guidance
     assert "seeds = 3" in guidance
+    assert "split_cp_baseline" in guidance
+    assert "average_prediction_set_size" in guidance
+
+
+def test_stage10_tabular_cpu_budget_contract_requires_split_cp_baseline() -> None:
+    files = {
+        "main.py": (
+            "def main():\n"
+            "    print('coverage_gap: 0.1')\n"
+            "    print('stability_aware_conformal/coverage_rate: 0.9')\n"
+        )
+    }
+
+    violations = _validate_tabular_cpu_budget_contract(
+        files,
+        topic="Conformal prediction for tabular classification under covariate shift",
+        experiment_mode="sandbox",
+        network_policy="none",
+    )
+
+    assert any(v["category"] == "tabular_split_cp_baseline" for v in violations)
 
 
 def test_stage10_runnable_metric_contract_rejects_class_only_main() -> None:

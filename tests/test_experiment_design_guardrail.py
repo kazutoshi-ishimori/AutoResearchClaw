@@ -208,7 +208,41 @@ def test_tabular_cpu_budget_constraints_clamp_heavy_synthetic_plan() -> None:
     text = _flatten_guardrail_text(constrained)
     assert "N<=5000" in text
     assert report["ok"] is True
+
+
+def test_tabular_conformal_plan_injects_split_cp_baseline_when_missing() -> None:
+    plan = {
+        "datasets": ["synthetic_covariate_shift"],
+        "proposed_methods": ["stability_aware_conformal"],
+        "baselines": [],
+    }
+
+    constrained, report = _apply_tabular_cpu_budget_constraints(
+        plan,
+        topic=(
+            "Stability-aware conformal prediction for reliable tabular "
+            "classification under covariate shift"
+        ),
+        domain_profile=_profile("ml_tabular", "Tabular Machine Learning"),
+        experiment_mode="sandbox",
+    )
+
+    text = _flatten_guardrail_text(constrained).lower()
+    assert "split_cp_baseline" in text
+    assert "split conformal prediction" in text
+    assert report["required_baselines"] == ["split_cp_baseline"]
     assert report["rewritten"] is True
+
+
+def test_stage9_tabular_guidance_requires_split_cp_baseline() -> None:
+    guidance = _stage9_tabular_cpu_budget_guidance(
+        topic="Conformal prediction for tabular classification under covariate shift",
+        domain_profile=_profile("ml_tabular", "Tabular Machine Learning"),
+        experiment_mode="sandbox",
+    )
+
+    assert "split_cp_baseline" in guidance
+    assert "standard Split Conformal Prediction" in guidance
 
 
 def test_tabular_cpu_budget_constraints_do_not_touch_other_domains() -> None:

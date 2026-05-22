@@ -219,6 +219,16 @@ def _stage10_tabular_cpu_budget_guidance(
         f"- Evaluate shift regimes <= {_TABULAR_CPU_MAX_SHIFT_REGIMES} total "
         "(for example 2 shift types x 2 magnitudes).\n"
         f"- Use seeds = {_TABULAR_CPU_SEED_COUNT} exactly and report mean/std.\n"
+        "- Implement and evaluate a required baseline named `split_cp_baseline`: "
+        "standard Split Conformal Prediction using the same base classifier, "
+        "calibration split, seeds, and shift regimes as the proposed method.\n"
+        "- Emit per-regime metrics for both `split_cp_baseline` and the proposed "
+        "method: coverage_rate, coverage_gap, and average_prediction_set_size. "
+        "Average prediction set size MUST be computed as the mean cardinality of "
+        "the predicted label set and must be >= 1.0 for classification.\n"
+        "- Use condition keys such as "
+        "`split_cp_baseline/marginal_covariate_0.5/coverage_rate` and "
+        "`proposed/marginal_covariate_0.5/coverage_rate` in results.json.\n"
         "- Use numpy/pandas/sklearn/scipy only for the runnable path; do not "
         "download external datasets and do not require GPU.\n"
         "- Use documented scikit-learn constructor signatures only. Do not "
@@ -480,6 +490,24 @@ def _validate_tabular_cpu_budget_contract(
                 break
         if any(v["category"] == "tabular_cpu_budget_shift_regimes" for v in violations):
             break
+    combined = "\n".join(files.values()).lower()
+    if not any(
+        marker in combined
+        for marker in (
+            "split_cp_baseline",
+            "split conformal",
+            "split_cp",
+            "split-cp",
+        )
+    ):
+        violations.append({
+            "category": "tabular_split_cp_baseline",
+            "path": ",".join(sorted(files)) or "(no files)",
+            "message": (
+                "Tabular conformal experiments must implement and emit metrics "
+                "for a standard Split-CP baseline named split_cp_baseline."
+            ),
+        })
     return violations
 
 
