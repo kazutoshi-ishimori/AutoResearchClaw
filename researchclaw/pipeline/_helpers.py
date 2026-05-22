@@ -1179,6 +1179,13 @@ def _topic_constraint_block(topic: str) -> str:
 
 
 _NAN_RE = re.compile(r"\bnan\b", re.IGNORECASE)
+_PREDICTION_SET_SIZE_METRICS = {
+    "average_prediction_set_size",
+    "avg_prediction_set_size",
+    "average_set_size",
+    "avg_set_size",
+    "set_size",
+}
 
 
 def _detect_runtime_issues(sandbox_result: Any) -> str:
@@ -1198,6 +1205,13 @@ def _detect_runtime_issues(sandbox_result: Any) -> str:
                 issues.append(f"METRIC NaN: '{key}' returned NaN — likely a division by zero or invalid computation in code")
             elif math.isinf(fval):
                 issues.append(f"METRIC Inf: '{key}' returned Infinity — likely overflow or unbounded computation")
+            elif _is_prediction_set_size_metric(str(key)) and fval < 1.0:
+                issues.append(
+                    f"PREDICTION SET SIZE INVALID: '{key}' = {fval} (<1.0). "
+                    "For classification conformal prediction, average prediction "
+                    "set size must be the mean cardinality of predicted label sets, "
+                    "not coverage rate, success probability, or a normalized fraction."
+                )
         except (TypeError, ValueError):
             pass
 
@@ -1299,6 +1313,13 @@ def _detect_runtime_issues(sandbox_result: Any) -> str:
         "Fix the ROOT CAUSE of these issues in the code:\n\n"
         + "\n\n".join(f"- {issue}" for issue in issues)
     )
+
+
+def _is_prediction_set_size_metric(metric_key: str) -> bool:
+    metric = metric_key.rsplit("/", 1)[-1].lower().replace("-", "_")
+    if metric.endswith("_mean"):
+        metric = metric[:-5]
+    return metric in _PREDICTION_SET_SIZE_METRICS
 
 
 # ---------------------------------------------------------------------------

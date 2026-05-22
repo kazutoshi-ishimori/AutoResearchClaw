@@ -40,11 +40,20 @@ def build_paper_contract(
     metric_direction: str = "maximize",
 ) -> dict[str, Any]:
     """Build a JSON-serializable contract from verified experiment artifacts."""
-    registry = VerifiedRegistry.from_run_dir(
-        run_dir,
-        metric_direction=metric_direction,
-        best_only=True,
-    )
+    summary, summary_path = load_experiment_summary_for_paper(run_dir)
+    if summary:
+        registry = VerifiedRegistry.from_experiment(
+            summary,
+            metric_direction=metric_direction,
+        )
+        source = f"load_experiment_summary_for_paper:{summary_path}"
+    else:
+        registry = VerifiedRegistry.from_run_dir(
+            run_dir,
+            metric_direction=metric_direction,
+            best_only=True,
+        )
+        source = "VerifiedRegistry.from_run_dir(best_only=True)"
     claim_ledger = build_claim_ledger(run_dir)
     claim_conditions = {
         str(claim.get("condition"))
@@ -66,7 +75,7 @@ def build_paper_contract(
     contract: dict[str, Any] = {
         "version": 1,
         "generated": _utcnow_iso(),
-        "source": "VerifiedRegistry.from_run_dir(best_only=True)",
+        "source": source,
         "metric_direction": metric_direction,
         "primary_metric": registry.primary_metric,
         "allowed_conditions": sorted(registry.condition_names),
@@ -155,7 +164,7 @@ def build_claim_ledger(run_dir: Path) -> dict[str, Any]:
     valid for one metric and impossible for another.  The claim ledger keeps
     the metric context so the writer can avoid plausible but invalid claims.
     """
-    summary = _load_experiment_summary(run_dir)
+    summary, _summary_path = load_experiment_summary_for_paper(run_dir)
     metrics_summary = summary.get("metrics_summary", {})
     condition_summaries = summary.get("condition_summaries", {})
     raw_claims: dict[tuple[str, str], dict[str, Any]] = {}
@@ -502,10 +511,12 @@ def _collect_available_figures(run_dir: Path) -> list[str]:
     return figures
 
 
-def _load_experiment_summary(run_dir: Path) -> dict[str, Any]:
-    candidates = [run_dir / "experiment_summary_best.json"]
-    candidates.extend(sorted(run_dir.glob("stage-14*/experiment_summary.json"), reverse=True))
-    for path in candidates:
+def load_experiment_summary_for_paper(run_dir: Path) -> tuple[dict[str, Any], Path | None]:
+    """Select the most useful experiment summary for paper evidence."""
+    candidates: list[tuple[dict[str, Any], Path]] = []
+    file_candidates = [run_dir / "experiment_summary_best.json"]
+    file_candidates.extend(sorted(run_dir.glob("stage-14*/experiment_summary.json"), reverse=True))
+    for path in file_candidates:
         if not path.is_file():
             continue
         try:
@@ -513,8 +524,134 @@ def _load_experiment_summary(run_dir: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, OSError):
             continue
         if isinstance(loaded, dict):
-            return loaded
-    return {}
+            candidates.append((loaded, path))
+    for path in sorted(run_dir.glob("stage-13*/refinement_log.json"), reverse=True):
+        if not path.is_file():
+            continue
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(loaded, dict):
+            recovered = _experiment_summary_from_refinement_log(loaded)
+            if recovered:
+                candidates.append((recovered, path))
+
+    best_summary: dict[str, Any] = {}
+    best_path: Path | None = None
+    best_score = -1
+    for loaded, path in candidates:
+        score = _experiment_summary_evidence_score(loaded)
+        if score > best_score:
+            best_summary = loaded
+            best_path = path
+            best_score = score
+    return best_summary, best_path
+
+
+def _load_experiment_summary(run_dir: Path) -> dict[str, Any]:
+    summary, _path = load_experiment_summary_for_paper(run_dir)
+    return summary
+
+
+def _experiment_summary_evidence_score(summary: dict[str, Any]) -> int:
+    metrics = summary.get("metrics_summary")
+    conditions = summary.get("condition_summaries")
+    metric_count = len(metrics) if isinstance(metrics, dict) else 0
+    condition_names = set(conditions) if isinstance(conditions, dict) else set()
+    baseline_count = sum(1 for name in condition_names if _looks_like_baseline(str(name)))
+    proposed_count = sum(
+        1
+        for name in condition_names
+        if any(token in str(name).lower() for token in ("proposed", "sacp", "stab"))
+    )
+    return metric_count + len(condition_names) * 5 + baseline_count * 1000 + proposed_count * 100
+
+
+def _experiment_summary_from_refinement_log(
+    refinement_log: dict[str, Any],
+) -> dict[str, Any]:
+    metrics_by_key: dict[str, list[float]] = {}
+    condition_metric_values: dict[str, dict[str, list[float]]] = {}
+    best_run_metrics: dict[str, float] = {}
+    iterations = refinement_log.get("iterations")
+    if not isinstance(iterations, list):
+        return {}
+
+    for item in iterations:
+        if not isinstance(item, dict):
+            continue
+        for sandbox_key in ("sandbox_after_fix", "sandbox"):
+            sandbox = item.get(sandbox_key)
+            if not isinstance(sandbox, dict):
+                continue
+            if sandbox.get("returncode") not in (None, 0):
+                continue
+            metrics = sandbox.get("metrics")
+            if not isinstance(metrics, dict):
+                continue
+            for raw_key, raw_value in metrics.items():
+                value = _to_float(raw_value)
+                if value is None:
+                    continue
+                key = str(raw_key)
+                best_run_metrics[key] = value
+                metrics_by_key.setdefault(key, []).append(value)
+                parsed = _parse_metric_path(key)
+                if parsed is None:
+                    continue
+                condition, metric = parsed
+                normalized_metric = _normalize_refinement_metric_name(metric)
+                if normalized_metric is None:
+                    continue
+                condition_metric_values.setdefault(condition, {}).setdefault(
+                    normalized_metric,
+                    [],
+                ).append(value)
+
+    if not metrics_by_key and not condition_metric_values:
+        return {}
+
+    metrics_summary = {
+        key: {
+            "mean": round(sum(values) / len(values), 8),
+            "min": min(values),
+            "max": max(values),
+            "count": len(values),
+        }
+        for key, values in sorted(metrics_by_key.items())
+        if values
+    }
+    condition_summaries: dict[str, Any] = {}
+    for condition, metric_values in sorted(condition_metric_values.items()):
+        metrics = {
+            metric: round(sum(values) / len(values), 8)
+            for metric, values in sorted(metric_values.items())
+            if values
+        }
+        if metrics:
+            condition_summaries[condition] = {
+                "metrics": metrics,
+                "n_seed_metrics": max(len(values) for values in metric_values.values()),
+            }
+
+    return {
+        "metrics_summary": metrics_summary,
+        "condition_summaries": condition_summaries,
+        "best_run": {"metrics": best_run_metrics},
+        "source": "recovered_from_refinement_log",
+    }
+
+
+def _normalize_refinement_metric_name(metric: str) -> str | None:
+    metric = metric.strip()
+    if not metric:
+        return None
+    if metric.endswith("_std"):
+        return None
+    if metric.endswith("_mean"):
+        return metric[:-5]
+    return metric
 
 
 def _condition_literal_numbers(conditions: set[str]) -> set[float]:

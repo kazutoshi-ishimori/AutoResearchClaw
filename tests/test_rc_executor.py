@@ -1597,6 +1597,19 @@ class TestDetectRuntimeIssues:
         result = rc_executor._detect_runtime_issues(r)
         assert "DUMMY" not in result
 
+    def test_detects_prediction_set_size_below_one(self) -> None:
+        r = self._make_sandbox_result(
+            metrics={
+                "split_cp_baseline/average_set_size": 0.91,
+                "proposed_sacp/coverage_rate": 0.9,
+            }
+        )
+
+        result = rc_executor._detect_runtime_issues(r)
+
+        assert "PREDICTION SET SIZE" in result
+        assert "split_cp_baseline/average_set_size" in result
+
 
 class TestRemoveBibtexEntries:
     """Tests for _remove_bibtex_entries() helper."""

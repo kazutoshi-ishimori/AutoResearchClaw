@@ -33,6 +33,7 @@ from researchclaw.pipeline._helpers import (
 )
 from researchclaw.pipeline.paper_contract import (
     load_paper_contract,
+    load_experiment_summary_for_paper,
     metric_claim_invalid_reason,
     repair_paper_contract_violations,
     render_paper_contract_instruction,
@@ -1367,26 +1368,17 @@ def _execute_paper_draft(
         include_experiment_data=True,  # WS-5.1: inject real experiment data
     )
 
-    # BUG-222: Read PROMOTED BEST experiment_summary for the paper prompt.
-    # Previous code (R21-1) picked the "richest" experiment_summary across
-    # all stage-14* dirs.  After REFINE regression, a later iteration with
-    # more conditions but worse quality could win, feeding the LLM regressed
-    # data.  Now: prefer experiment_summary_best.json (written by
-    # _promote_best_stage14()), fall back to richest stage-14* for
-    # non-REFINE runs.
+    # Select the strongest paper evidence. This normally comes from the
+    # promoted best experiment_summary, but can recover richer verified metrics
+    # from refinement_log when Stage 14/root summaries are stale.
     exp_summary_text = None
-    _best_path = run_dir / "experiment_summary_best.json"
-    if _best_path.is_file():
-        try:
-            _text = _best_path.read_text(encoding="utf-8")
-            _parsed = _safe_json_loads(_text, {})
-            if isinstance(_parsed, dict) and (
-                _parsed.get("condition_summaries") or _parsed.get("metrics_summary")
-            ):
-                exp_summary_text = _text
-                logger.info("BUG-222: Using promoted experiment_summary_best.json")
-        except OSError:
-            pass
+    _selected_summary, _selected_summary_path = load_experiment_summary_for_paper(run_dir)
+    if _selected_summary and _selected_summary_path is not None:
+        exp_summary_text = json.dumps(_selected_summary, indent=2, ensure_ascii=False)
+        logger.info(
+            "Paper evidence: selected %s for experiment summary",
+            _selected_summary_path,
+        )
     if exp_summary_text is None:
         # Fallback: pick richest stage-14* (pre-BUG-222 behavior)
         _best_metric_count = 0

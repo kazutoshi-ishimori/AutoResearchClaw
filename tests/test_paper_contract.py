@@ -150,6 +150,98 @@ def test_build_paper_contract_excludes_invalid_conformal_set_size_claims(
     assert 0.5 in contract["allowed_numbers"]
 
 
+def test_build_paper_contract_prefers_stage14_summary_with_split_cp_over_stale_root(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import build_paper_contract
+
+    run_dir = tmp_path / "run"
+    _write_conformal_summary_without_baseline(run_dir)
+    stale_root = run_dir / "experiment_summary_best.json"
+    stale_root.write_text((run_dir / "stage-14" / "experiment_summary.json").read_text(), encoding="utf-8")
+
+    stage14_new = run_dir / "stage-14_v1"
+    stage14_new.mkdir()
+    stage14_new.joinpath("experiment_summary.json").write_text(
+        json.dumps(
+            {
+                "metrics_summary": {
+                    "split_cp_baseline_mag0.5/coverage_gap": {
+                        "mean": 0.12,
+                        "min": 0.12,
+                        "max": 0.12,
+                        "count": 3,
+                    },
+                    "proposed_sacp_mag0.5/coverage_gap": {
+                        "mean": 0.08,
+                        "min": 0.08,
+                        "max": 0.08,
+                        "count": 3,
+                    },
+                },
+                "condition_summaries": {
+                    "split_cp_baseline_mag0.5": {"metrics": {"coverage_gap": 0.12}},
+                    "proposed_sacp_mag0.5": {"metrics": {"coverage_gap": 0.08}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    contract = build_paper_contract(run_dir, metric_direction="minimize")
+
+    assert contract["claim_ledger"]["baseline_conditions"] == ["split_cp_baseline_mag0.5"]
+
+
+def test_build_paper_contract_recovers_split_cp_from_refinement_log_when_summaries_are_stale(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import build_paper_contract
+
+    run_dir = tmp_path / "run"
+    _write_conformal_summary_without_baseline(run_dir)
+    (run_dir / "experiment_summary_best.json").write_text(
+        (run_dir / "stage-14" / "experiment_summary.json").read_text(),
+        encoding="utf-8",
+    )
+    stage13 = run_dir / "stage-13"
+    stage13.mkdir()
+    stage13.joinpath("refinement_log.json").write_text(
+        json.dumps(
+            {
+                "iterations": [
+                    {
+                        "version_dir": "experiment_v1/",
+                        "sandbox_after_fix": {
+                            "returncode": 0,
+                            "metrics": {
+                                "split_cp_baseline_mag0.5/coverage_gap": 0.12,
+                                "split_cp_baseline_mag0.5/coverage_rate": 0.88,
+                                "split_cp_baseline_mag0.5/average_set_size": 0.88,
+                                "proposed_sacp_mag0.5/coverage_gap": 0.08,
+                                "proposed_sacp_mag0.5/coverage_rate": 0.92,
+                                "proposed_sacp_mag0.5/average_set_size": 1.42,
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    contract = build_paper_contract(run_dir, metric_direction="minimize")
+
+    assert "split_cp_baseline_mag0.5" in contract["allowed_conditions"]
+    assert contract["claim_ledger"]["baseline_conditions"] == ["split_cp_baseline_mag0.5"]
+    assert any(
+        item["condition"] == "split_cp_baseline_mag0.5"
+        and item["metric"] == "average_set_size"
+        and item["reason"] == "prediction_set_size_below_one"
+        for item in contract["claim_ledger"]["invalid_metric_claims"]
+    )
+
+
 def test_render_paper_contract_instruction_forbids_comparative_claims_without_baseline(
     tmp_path: Path,
 ) -> None:
