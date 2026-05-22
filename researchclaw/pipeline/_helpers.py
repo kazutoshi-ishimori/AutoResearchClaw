@@ -1228,6 +1228,9 @@ def _detect_runtime_issues(sandbox_result: Any) -> str:
                 f"NaN values detected in output:\n" + "\n".join(nan_lines[:10])
             )
 
+    if stdout:
+        issues.extend(_detect_prediction_set_size_stdout_issues(stdout))
+
     # Extract meaningful warnings from stderr
     stderr = getattr(sandbox_result, "stderr", "") or ""
     if stderr.strip():
@@ -1279,6 +1282,11 @@ def _detect_runtime_issues(sandbox_result: Any) -> str:
             # Extract metric suffix (e.g. "convergence_rate" from "UCB (Stochastic) convergence_rate")
             name = parts[0].strip()
             metric_suffix = name.split()[-1] if name.split() else name
+            if _is_prediction_set_size_metric(metric_suffix) and fval < 1.0:
+                issues.append(
+                    f"PREDICTION SET SIZE INVALID: '{name}' = {fval} (<1.0). "
+                    "Average prediction set size must be mean label-set cardinality."
+                )
             metric_values_by_name.setdefault(metric_suffix, []).append(fval)
 
         for metric_name, vals in metric_values_by_name.items():
@@ -1319,7 +1327,55 @@ def _is_prediction_set_size_metric(metric_key: str) -> bool:
     metric = metric_key.rsplit("/", 1)[-1].lower().replace("-", "_")
     if metric.endswith("_mean"):
         metric = metric[:-5]
-    return metric in _PREDICTION_SET_SIZE_METRICS
+    compact = metric.replace("_", "")
+    return metric in _PREDICTION_SET_SIZE_METRICS or compact in {
+        known.replace("_", "") for known in _PREDICTION_SET_SIZE_METRICS
+    }
+
+
+def _detect_prediction_set_size_stdout_issues(stdout: str) -> list[str]:
+    issues: list[str] = []
+    avg_set_index: int | None = None
+    for line in stdout.splitlines():
+        if "|" not in line:
+            avg_set_index = None
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if not cells:
+            continue
+        normalized = [cell.lower().replace(" ", "_").replace("-", "_") for cell in cells]
+        for idx, cell in enumerate(normalized):
+            if _is_prediction_set_size_metric(cell):
+                avg_set_index = idx
+                break
+        else:
+            if avg_set_index is None or avg_set_index >= len(cells):
+                continue
+            if all(set(cell) <= {"-"} for cell in cells if cell):
+                continue
+            value = _first_float(cells[avg_set_index])
+            if value is None or value >= 1.0:
+                continue
+            condition = cells[0] if cells else "unknown"
+            issues.append(
+                f"PREDICTION SET SIZE INVALID: stdout table row '{condition}' "
+                f"reports average set size {value} (<1.0). Average prediction set "
+                "size must be mean label-set cardinality, not coverage rate."
+            )
+    return issues
+
+
+def _first_float(text: str) -> float | None:
+    match = re.search(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", text)
+    if not match:
+        return None
+    try:
+        value = float(match.group(0))
+    except ValueError:
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 # ---------------------------------------------------------------------------

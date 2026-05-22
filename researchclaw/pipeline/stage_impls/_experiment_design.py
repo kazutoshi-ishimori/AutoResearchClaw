@@ -461,6 +461,32 @@ def _has_split_cp_baseline(items: Any) -> bool:
     )
 
 
+def _has_exact_split_cp_baseline(items: Any) -> bool:
+    for item in _normalize_plan_field(items):
+        if isinstance(item, dict):
+            name = str(item.get("name", "")).strip().lower()
+        else:
+            name = str(item).strip().lower()
+        if name == "split_cp_baseline":
+            return True
+    return False
+
+
+def _is_split_cp_alias_baseline(item: Any) -> bool:
+    if isinstance(item, dict):
+        text = str(item.get("name", item)).strip().lower()
+    else:
+        text = str(item).strip().lower()
+    return any(
+        alias in text
+        for alias in (
+            "standard conformal prediction",
+            "standard split conformal",
+            "calibrated prediction sets",
+        )
+    )
+
+
 def _apply_tabular_cpu_budget_constraints(
     plan: dict[str, Any],
     *,
@@ -492,11 +518,19 @@ def _apply_tabular_cpu_budget_constraints(
 
     baselines = _normalize_plan_field(constrained.get("baselines"))
     required_baselines: list[str] = []
-    if not _has_split_cp_baseline(baselines):
+    filtered_baselines = [
+        item for item in baselines if not _is_split_cp_alias_baseline(item)
+    ]
+    if len(filtered_baselines) != len(baselines):
+        baselines = filtered_baselines
+        rewritten = True
+    if not _has_exact_split_cp_baseline(baselines):
         baselines.insert(0, dict(_TABULAR_CONFORMAL_REQUIRED_BASELINE))
         constrained["baselines"] = baselines
         required_baselines.append("split_cp_baseline")
         rewritten = True
+    elif baselines != _normalize_plan_field(constrained.get("baselines")):
+        constrained["baselines"] = baselines
 
     regime_factors = constrained.get("regime_factors")
     if isinstance(regime_factors, dict):

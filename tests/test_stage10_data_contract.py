@@ -282,6 +282,8 @@ def test_stage10_tabular_cpu_budget_guidance_mentions_exact_limits() -> None:
     assert "seeds = 3" in guidance
     assert "split_cp_baseline" in guidance
     assert "average_prediction_set_size" in guidance
+    assert "Do not create alias baselines" in guidance
+    assert "condition=<name>" in guidance
 
 
 def test_stage10_tabular_cpu_budget_contract_requires_split_cp_baseline() -> None:

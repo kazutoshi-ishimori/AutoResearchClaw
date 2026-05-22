@@ -1610,6 +1610,20 @@ class TestDetectRuntimeIssues:
         assert "PREDICTION SET SIZE" in result
         assert "split_cp_baseline/average_set_size" in result
 
+    def test_detects_prediction_set_size_below_one_in_summary_table(self) -> None:
+        stdout = """
+| Condition | CoverageRate | CoverageGap | AvgSetSize |
+|---|---|---|---|
+| split_cp_baseline | 0.9001 ± 0.01 | 0.0127 ± 0.0048 | 0.9001 ± 0.0136 |
+| proposed_sacp | 0.9038 ± 0.0048 | 0.0057 ± 0.0021 | 1.9038 ± 0.0048 |
+"""
+        r = self._make_sandbox_result(stdout=stdout)
+
+        result = rc_executor._detect_runtime_issues(r)
+
+        assert "PREDICTION SET SIZE" in result
+        assert "split_cp_baseline" in result
+
 
 class TestRemoveBibtexEntries:
     """Tests for _remove_bibtex_entries() helper."""

@@ -234,6 +234,33 @@ def test_tabular_conformal_plan_injects_split_cp_baseline_when_missing() -> None
     assert report["rewritten"] is True
 
 
+def test_tabular_conformal_plan_requires_exact_split_cp_baseline_name() -> None:
+    plan = {
+        "datasets": ["synthetic_covariate_shift"],
+        "proposed_methods": ["stability_aware_conformal"],
+        "baselines": [
+            "Standard Conformal Prediction",
+            "Calibrated Prediction Sets",
+            "Weighted Conformal Prediction",
+        ],
+    }
+
+    constrained, report = _apply_tabular_cpu_budget_constraints(
+        plan,
+        topic=(
+            "Stability-aware conformal prediction for reliable tabular "
+            "classification under covariate shift"
+        ),
+        domain_profile=_profile("ml_tabular", "Tabular Machine Learning"),
+        experiment_mode="sandbox",
+    )
+
+    baseline_text = _flatten_guardrail_text(constrained["baselines"]).lower()
+    assert "split_cp_baseline" in baseline_text
+    assert "calibrated prediction sets" not in baseline_text
+    assert report["rewritten"] is True
+
+
 def test_stage9_tabular_guidance_requires_split_cp_baseline() -> None:
     guidance = _stage9_tabular_cpu_budget_guidance(
         topic="Conformal prediction for tabular classification under covariate shift",
