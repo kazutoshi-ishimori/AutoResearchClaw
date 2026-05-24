@@ -191,6 +191,22 @@ prompts:
   custom_file: ""  # e.g. "my_prompts.yaml" (empty = use built-in defaults)
 
 
+# === Skills (agentskills.io SKILL.md format) ===
+# ARC loads skills from builtin / user / project / MetaClaw / external dirs.
+# external_dirs is intended for third-party skill collections such as
+# google-deepmind/science-skills (added under .external/science-skills as a
+# git submodule). Matcher selects top max_skills_per_stage per stage; even
+# without ARC-specific metadata (applicable-stages / trigger-keywords),
+# fallback_matching scores skills by description-keyword overlap.
+skills:
+  enabled: true
+  auto_match: true
+  max_skills_per_stage: 3
+  fallback_matching: true
+  external_dirs:
+    - ".external/science-skills/skills"
+
+
 # === MetaClaw Integration ===
 # Enable the MetaClaw bridge to get skill injection, PRM quality gates,
 # and continuous learning from research pipeline failures.
