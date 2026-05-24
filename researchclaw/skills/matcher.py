@@ -10,9 +10,28 @@ from researchclaw.skills.schema import STAGE_NAME_TO_NUMBER, Skill
 logger = logging.getLogger(__name__)
 
 
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "with",
+    "by", "from", "as", "at", "is", "are", "was", "were", "be", "been",
+    "being", "do", "does", "did", "done", "has", "have", "had",
+    "use", "uses", "used", "using", "when", "you", "your", "this", "that",
+    "these", "those", "it", "its", "their", "they", "them",
+    "not", "but", "if", "than", "then", "so", "such",
+    "want", "get", "gets", "getting", "may", "can", "should", "would",
+    "will", "shall", "must",
+})
+
+# Require ≥2 token overlaps between a skill's description and the context
+# before the fallback path admits it. Single coincidental matches on
+# common research vocabulary produced near-tie scores that promoted
+# unrelated skills (e.g. Human Protein Atlas surfacing on CIFAR-10).
+_MIN_FALLBACK_OVERLAP = 2
+
+
 def _tokenize(text: str) -> set[str]:
-    """Extract lowercase tokens from text."""
-    return set(re.findall(r"[a-z0-9_]+", text.lower()))
+    """Extract lowercase tokens from text, excluding common stop words."""
+    raw = set(re.findall(r"[a-z0-9_]+", text.lower()))
+    return raw - _STOP_WORDS
 
 
 def _resolve_stage(stage: int | str) -> int:
@@ -70,7 +89,7 @@ def match_skills(
         if keyword_score == 0.0 and not has_keywords and fallback_matching:
             desc_tokens = _tokenize(skill.description)
             overlap = len(desc_tokens & context_tokens)
-            if overlap > 0:
+            if overlap >= _MIN_FALLBACK_OVERLAP:
                 keyword_score = overlap * 0.5  # 0.5x discount
                 max_possible = max(len(desc_tokens), 1)
                 normalized_kw = keyword_score / max_possible
