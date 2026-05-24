@@ -32,11 +32,13 @@ from researchclaw.pipeline._helpers import (
     _utcnow_iso,
 )
 from researchclaw.pipeline.paper_contract import (
+    deduplicate_markdown_sections,
     load_paper_contract,
     load_experiment_summary_for_paper,
     metric_claim_invalid_reason,
     repair_paper_contract_violations,
     render_paper_contract_instruction,
+    sanitize_unsupported_mechanisms,
     write_paper_contract,
 )
 from researchclaw.pipeline.stages import Stage, StageStatus
@@ -585,7 +587,10 @@ def _write_paper_sections(
         f"5. **Method** {_section_target_text(_section_targets, 'method')}: formal problem definition with mathematical notation "
         "($x$, $\\theta$, etc.), detailed algorithm description with equations, step-by-step procedure, "
         "complexity analysis, design rationale for key choices. Include algorithm pseudocode if applicable. "
-        "Write as FLOWING PROSE — do NOT use bullet-point lists for method components.\n"
+        "Write as FLOWING PROSE — do NOT use bullet-point lists for method components. "
+        "Do NOT invent modules, controllers, topology components, density-ratio estimators, "
+        "or named subroutines unless they are explicitly present in the experiment code, "
+        "experiment summary, or PAPER CONTRACT.\n"
         f"6. **Experiments** {_section_target_text(_section_targets, 'experiments')}: detailed experimental setup, datasets with statistics "
         "(size, splits, features), all baselines and their implementations, hyperparameter settings "
         "in a markdown table, evaluation metrics with mathematical definitions, hardware and runtime info.\n"
@@ -625,16 +630,20 @@ def _write_paper_sections(
         f"---\n{part1}\n\n{part2}\n---\n\n"
         "Now write the final sections, maintaining consistency:\n\n"
         f"7. **Results** {_section_target_text(_section_targets, 'results')}:\n"
-        "   - START with an AGGREGATED results table (Table 1): rows = methods, columns = metrics.\n"
-        "     Each cell = mean \u00b1 std across seeds. Bold the best value per column.\n"
+        "   - START with the verified aggregate results table from PRE-BUILT RESULTS TABLES "
+        "when one is provided; copy its numeric cells verbatim.\n"
         "     EVERY table MUST have a descriptive caption that allows understanding without "
-        "     reading the main text. NEVER use just 'Table 1' as a caption.\n"
-        "   - Follow with a PER-REGIME table (Table 2) breaking down by easy/hard regimes.\n"
-        "   - Include a STATISTICAL COMPARISON table (Table 3): paired t-tests between key methods.\n"
+        "     reading the main text.\n"
+        "   - Do NOT create additional numeric results tables unless the exact rows and cells "
+        "     are present in PRE-BUILT RESULTS TABLES or PAIRED STATISTICAL COMPARISONS.\n"
+        "   - Do NOT invent per-regime tables, statistical-comparison tables, p-values, or "
+        "     confidence intervals when they are not explicitly provided.\n"
         "   - NEVER dump raw per-seed numbers in the main text. Aggregate first, then discuss.\n"
-        "   - MUST include at least 2 figures using markdown image syntax: ![Caption](charts/filename.png)\n"
-        "     One figure MUST be a performance comparison chart. Figures MUST be referenced "
-        "     in text: 'As shown in Figure 1, ...'\n"
+        "   - Embed only available figures with markdown image syntax: ![Caption](charts/filename.png).\n"
+        "     Do NOT hand-number figures or tables in prose; describe them by caption or topic.\n"
+        "   - Do not mention unsupported mechanisms such as PD control, topological quantile "
+        "     anchoring, or density-ratio estimation unless those exact mechanisms appear in "
+        "     the experiment code or summary.\n"
         f"8. **Discussion** {_section_target_text(_section_targets, 'discussion')}: interpretation of key findings, unexpected results, "
         "comparison with prior work (CITE 3-5 papers here!), practical implications.\n"
         f"9. **Limitations** {_section_target_text(_section_targets, 'limitations')}: honest assessment of scope, dataset, methodology. "
@@ -1971,20 +1980,24 @@ def _execute_paper_draft(
                 len(_chart_files),
             )
 
-    # WS-5.5: Framework diagram placeholder instruction
-    exp_metrics_instruction += (
-        "\n\n## FRAMEWORK DIAGRAM PLACEHOLDER\n"
-        "In the Method/Approach section, include a placeholder for the methodology "
-        "framework overview figure. Insert this exactly:\n\n"
-        "```\n"
-        "![Framework Overview](charts/framework_diagram.png)\n"
-        "**Figure N.** Overview of the proposed methodology. "
-        "[A detailed framework diagram will be generated separately and inserted here.]\n"
-        "```\n\n"
-        "This figure should be referenced in the text as 'Figure N' and discussed briefly "
-        "(1-2 sentences describing the overall pipeline/architecture flow). "
-        "The actual image will be generated post-hoc using a text-to-image model.\n"
-    )
+    # WS-5.5 / paper-integrity: never require a placeholder image that is not
+    # present in the contract.  Local/cloud models tend to turn placeholder
+    # instructions into unsupported figure references.
+    _available_figures = set(_paper_contract.get("available_figures") or [])
+    if "charts/framework_diagram.png" in _available_figures:
+        exp_metrics_instruction += (
+            "\n\n## FRAMEWORK DIAGRAM\n"
+            "The framework diagram exists and may be embedded with markdown image syntax:\n"
+            "`![Framework overview](charts/framework_diagram.png)`.\n"
+        )
+    else:
+        exp_metrics_instruction += (
+            "\n\n## FIGURE INTEGRITY RULE\n"
+            "Do NOT add placeholder figures or reference missing figures. "
+            "Only embed files listed under PAPER CONTRACT / AVAILABLE FIGURES. "
+            "Do NOT hand-number figures or tables; avoid phrases like 'Figure 6' "
+            "or 'Table 4' unless those labels are produced by the renderer.\n"
+        )
 
     # P5: Extract hyperparameters from results.json for paper Method section
     _hp_table = ""
@@ -2217,6 +2230,22 @@ Generated: {_utcnow_iso()}
             )
             artifacts.append("draft_contract_repair.json")
             evidence_refs.append("stage-17/draft_contract_repair.json")
+    draft, _mechanism_sanitization = sanitize_unsupported_mechanisms(draft, run_dir)
+    if _mechanism_sanitization.get("sanitized"):
+        (stage_dir / "unsupported_mechanism_sanitization.json").write_text(
+            json.dumps(_mechanism_sanitization, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifacts.append("unsupported_mechanism_sanitization.json")
+        evidence_refs.append("stage-17/unsupported_mechanism_sanitization.json")
+    draft, _dedupe_report = deduplicate_markdown_sections(draft)
+    if _dedupe_report.get("sanitized"):
+        (stage_dir / "section_deduplication.json").write_text(
+            json.dumps(_dedupe_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifacts.append("section_deduplication.json")
+        evidence_refs.append("stage-17/section_deduplication.json")
     (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
 
     # Validate draft quality (section balance + bullet density)

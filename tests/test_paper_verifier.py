@@ -84,6 +84,17 @@ Following the work of Smith et al. (2025), we propose...
         result = verify_paper(tex, reg)
         assert result.severity == "PASS"
 
+    def test_structural_figure_and_table_numbers_allowed_in_results(self):
+        reg = _make_registry(conditions={"split_cp_baseline": {0: 0.9283}})
+        tex = r"""
+\section{Results}
+As shown in Figure 6 and Table 7, Split CP reaches 0.9283 coverage.
+"""
+        result = verify_paper(tex, reg)
+        assert result.severity == "PASS"
+        assert result.strict_violations == 0
+        assert all(u.value not in {6.0, 7.0} for u in result.unverified_numbers)
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — fabricated numbers
@@ -170,6 +181,54 @@ PPO & 75.0 \\
         assert len(result.fabricated_conditions) >= 1
         assert any(fc.name == "PPO" for fc in result.fabricated_conditions)
         assert result.severity == "REJECT"
+
+    def test_conformal_display_aliases_are_not_fabricated_conditions(self):
+        reg = _make_registry(
+            conditions={
+                "split_cp_baseline": {0: 0.9283},
+                "stability_aware_cp": {0: 0.9571},
+                "weighted_cp": {0: 0.9385},
+            }
+        )
+        tex = r"""
+\section{Results}
+\begin{table}[h]
+\begin{tabular}{lc}
+Split CP & 0.9283 \\
+S-CP & 0.9571 \\
+STAB-CP & 0.9571 \\
+Weighted CP & 0.9385 \\
+W-CP & 0.9385 \\
+\end{tabular}
+\end{table}
+"""
+        result = verify_paper(tex, reg)
+        assert result.fabricated_conditions == []
+        assert result.severity == "PASS"
+
+    def test_bold_figure_labels_and_table_headers_are_not_conditions(self):
+        reg = _make_registry(
+            conditions={
+                "split_cp_baseline": {0: 0.6211},
+                "stability_aware_cp": {0: 0.6080},
+            }
+        )
+        tex = r"""
+\section{Results}
+We evaluate \textbf{Coverage Rate}, \textbf{Coverage Gap}, and \textbf{Average Set Size}.
+\textbf{Experimental Configuration:} the setup follows the verified benchmark.
+\begin{table}[h]
+\begin{tabular}{lcc}
+\textbf{Method} & \textbf{Metric (Efficiency)} & \textbf{Seed 0} \\
+Split CP & 0.6211 & 0.6211 \\
+S-CP & 0.6080 & 0.6080 \\
+\end{tabular}
+\end{table}
+\textbf{Figure 6.} Efficiency comparison for the verified conditions.
+"""
+        result = verify_paper(tex, reg)
+        assert result.fabricated_conditions == []
+        assert result.severity == "PASS"
 
 
 # ---------------------------------------------------------------------------

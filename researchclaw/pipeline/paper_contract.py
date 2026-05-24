@@ -153,6 +153,10 @@ def render_paper_contract_instruction(contract: dict[str, Any]) -> str:
         "or omit the claim.\n"
         "- Tables must use only verified conditions and allowed numeric values. "
         "Use `--` for unsupported cells.\n"
+        "- Do not hand-number figures or tables (for example, do not write "
+        "`Figure 6` or `Table 4` yourself); let the renderer assign numbering.\n"
+        "- Do not mention unsupported mechanisms, module names, or control schemes "
+        "unless they appear in the experiment code or summary.\n"
         + _render_claim_ledger_instruction(contract.get("claim_ledger"))
     )
 
@@ -493,6 +497,210 @@ def repair_paper_contract_violations(
         report["accepted"] = True
         return candidate, report
     return paper, report
+
+
+_UNSUPPORTED_MECHANISMS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "pd_control",
+        "paper_pattern": re.compile(
+            r"\b(?:PD[- ]?Control|PD[- ]?controller|PD[- ]?update|K_p|K_d)\b",
+            re.IGNORECASE,
+        ),
+        "support_tokens": {
+            "pdcontrol", "pdcontroller", "pidcontrol", "pidcontroller", "k_p", "k_d",
+        },
+    },
+    {
+        "name": "topological_quantile_anchoring",
+        "paper_pattern": re.compile(
+            r"\b(?:Topological Quantile Anchoring|TQA|persistence diagrams?|persistent homology)\b",
+            re.IGNORECASE,
+        ),
+        "support_tokens": {
+            "topologicalquantileanchoring", "tqa", "persistencediagram",
+            "persistencediagrams", "persistenthomology",
+        },
+    },
+    {
+        "name": "hybrid_contamination_aware_scoring",
+        "paper_pattern": re.compile(
+            r"\b(?:Hybrid Contamination[- ]Aware|contamination[- ]aware scoring)\b",
+            re.IGNORECASE,
+        ),
+        "support_tokens": {
+            "hybridcontaminationaware", "contaminationawarescoring",
+        },
+    },
+)
+
+
+def sanitize_unsupported_mechanisms(
+    paper: str,
+    run_dir: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Remove mechanism claims that do not appear in experiment evidence.
+
+    This is intentionally conservative: a term is removed only when it appears
+    in the paper and no matching support token appears in pre-paper experiment
+    artifacts.  If a future experiment genuinely implements TQA, PD control, or
+    a contamination-aware scorer, the evidence text will protect those claims.
+    """
+    evidence_text = _collect_mechanism_evidence_text(run_dir)
+    evidence_compact = _compact_evidence_text(evidence_text)
+    active_patterns: list[dict[str, Any]] = []
+    for item in _UNSUPPORTED_MECHANISMS:
+        pattern = item["paper_pattern"]
+        if not pattern.search(paper):
+            continue
+        support_tokens = item["support_tokens"]
+        if any(token in evidence_compact for token in support_tokens):
+            continue
+        active_patterns.append(item)
+
+    report: dict[str, Any] = {
+        "sanitized": False,
+        "removed_line_count": 0,
+        "removed_lines": [],
+        "active_mechanisms": [item["name"] for item in active_patterns],
+        "generated": _utcnow_iso(),
+    }
+    if not active_patterns:
+        return paper, report
+
+    sanitized_lines: list[str] = []
+    for line_no, line in enumerate(paper.splitlines(), start=1):
+        matched = [
+            item["name"]
+            for item in active_patterns
+            if item["paper_pattern"].search(line)
+        ]
+        if matched:
+            report["removed_line_count"] += 1
+            report["removed_lines"].append(
+                {
+                    "line": line_no,
+                    "mechanisms": matched,
+                    "text": line.strip()[:180],
+                }
+            )
+            continue
+        sanitized_lines.append(line)
+
+    sanitized = "\n".join(sanitized_lines)
+    sanitized = _sanitize_placeholder_fragments(sanitized)
+    report["sanitized"] = sanitized != paper
+    return sanitized, report
+
+
+def deduplicate_markdown_sections(
+    paper: str,
+    *,
+    section_names: set[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Remove later duplicate major sections from a markdown paper."""
+    if section_names is None:
+        section_names = {"results", "discussion", "limitations", "conclusion"}
+    lines = paper.splitlines()
+    seen: set[str] = set()
+    output: list[str] = []
+    report: dict[str, Any] = {
+        "sanitized": False,
+        "removed_section_count": 0,
+        "removed_sections": [],
+        "generated": _utcnow_iso(),
+    }
+    skip_until_level: int | None = None
+    skipped_section: str | None = None
+
+    for idx, line in enumerate(lines, start=1):
+        heading = _markdown_section_heading(line)
+        if skip_until_level is not None:
+            if heading is None or heading[0] > skip_until_level:
+                continue
+            skip_until_level = None
+            skipped_section = None
+
+        if heading is not None:
+            level, normalized = heading
+            if normalized in section_names and normalized in seen:
+                skip_until_level = level
+                skipped_section = normalized
+                report["removed_section_count"] += 1
+                report["removed_sections"].append(
+                    {"section": skipped_section, "line": idx}
+                )
+                continue
+            if normalized in section_names:
+                seen.add(normalized)
+        output.append(line)
+
+    cleaned = "\n".join(output)
+    report["sanitized"] = cleaned != paper
+    return cleaned, report
+
+
+def _markdown_section_heading(line: str) -> tuple[int, str] | None:
+    match = re.match(r"^\s*(#{1,4})\s+(.+?)\s*$", line)
+    if not match:
+        return None
+    title = re.sub(r"[*_`]", "", match.group(2)).strip().lower()
+    title = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", title)
+    return len(match.group(1)), title
+
+
+def _collect_mechanism_evidence_text(run_dir: Path) -> str:
+    chunks: list[str] = []
+    for stage_dir in sorted(run_dir.glob("stage-*")):
+        stage_num = _stage_number(stage_dir.name)
+        if stage_num is None or stage_num > 15:
+            continue
+        for path in sorted(stage_dir.rglob("*")):
+            if not path.is_file() or not _is_mechanism_evidence_file(path):
+                continue
+            try:
+                if path.stat().st_size > 300_000:
+                    continue
+                chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+    return "\n".join(chunks)
+
+
+def _is_mechanism_evidence_file(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return True
+    if suffix in {".yaml", ".yml"}:
+        return True
+    if suffix == ".json":
+        name = path.name.lower()
+        return name in {
+            "experiment_summary.json",
+            "refinement_log.json",
+            "results.json",
+            "experiment_config.json",
+        }
+    if suffix == ".txt":
+        return "stdout" in path.name.lower() or "stderr" in path.name.lower()
+    return False
+
+
+def _stage_number(name: str) -> int | None:
+    match = re.match(r"stage-(\d+)", name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _compact_evidence_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", text.lower())
+
+
+def _sanitize_placeholder_fragments(paper: str) -> str:
+    """Clean prose placeholders introduced by contract repair."""
+    paper = re.sub(r"\bwithin\s+--\s+of\s+", "near ", paper)
+    paper = re.sub(r"\bbetween\s+--\s+and\s+--", "across an unspecified range", paper)
+    return paper
 
 
 def _collect_available_figures(run_dir: Path) -> list[str]:

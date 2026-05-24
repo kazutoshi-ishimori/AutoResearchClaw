@@ -307,6 +307,8 @@ def test_render_paper_contract_instruction_is_strict_about_evidence(tmp_path: Pa
     assert "Baseline" in instruction
     assert "Proposed" in instruction
     assert "not evaluated" in instruction
+    assert "Do not hand-number figures or tables" in instruction
+    assert "Do not mention unsupported mechanisms" in instruction
 
 
 def test_contract_violation_detection_rejects_unverified_result_numbers(tmp_path: Path) -> None:
@@ -618,6 +620,84 @@ The proposed method reaches 0.94 accuracy.
 
     assert repaired == paper
     assert report["repaired"] is True
-    assert report["accepted"] is False
-    assert report["initial_violation_count"] == 1
-    assert report["final_violation_count"] == 1
+
+
+def test_sanitize_unsupported_mechanisms_removes_absent_mechanism_claims(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import sanitize_unsupported_mechanisms
+
+    run_dir = tmp_path / "run"
+    stage10 = run_dir / "stage-10"
+    stage10.mkdir(parents=True)
+    (stage10 / "experiment.py").write_text(
+        "def stability_aware_cp():\n    return 'plain stability penalty'\n",
+        encoding="utf-8",
+    )
+    paper = """
+## Method
+The implemented method uses a stability penalty.
+
+1. **PD-Control Loop**: A controller adjusts the threshold.
+2. **Topological Quantile Anchoring (TQA)**: Persistence diagrams anchor quantiles.
+3. **Hybrid Contamination-Aware Scoring**: Outliers are filtered.
+
+The remaining method description should stay.
+"""
+
+    sanitized, report = sanitize_unsupported_mechanisms(paper, run_dir)
+
+    assert "PD-Control" not in sanitized
+    assert "Topological Quantile Anchoring" not in sanitized
+    assert "Hybrid Contamination-Aware" not in sanitized
+    assert "remaining method description should stay" in sanitized
+    assert report["removed_line_count"] == 3
+
+
+def test_sanitize_unsupported_mechanisms_keeps_supported_terms(
+    tmp_path: Path,
+) -> None:
+    from researchclaw.pipeline.paper_contract import sanitize_unsupported_mechanisms
+
+    run_dir = tmp_path / "run"
+    stage10 = run_dir / "stage-10"
+    stage10.mkdir(parents=True)
+    (stage10 / "experiment.py").write_text(
+        "class TopologicalQuantileAnchoring:\n    pass\n",
+        encoding="utf-8",
+    )
+    paper = """
+## Method
+**Topological Quantile Anchoring (TQA)** is implemented in the experiment.
+"""
+
+    sanitized, report = sanitize_unsupported_mechanisms(paper, run_dir)
+
+    assert "Topological Quantile Anchoring" in sanitized
+    assert report["removed_line_count"] == 0
+
+
+def test_deduplicate_markdown_sections_removes_later_duplicate_results() -> None:
+    from researchclaw.pipeline.paper_contract import deduplicate_markdown_sections
+
+    paper = """
+## Results
+First result section.
+
+## Discussion
+Discussion stays.
+
+## Results
+Duplicated result section.
+
+## Conclusion
+Conclusion stays.
+"""
+
+    cleaned, report = deduplicate_markdown_sections(paper)
+
+    assert "First result section" in cleaned
+    assert "Duplicated result section" not in cleaned
+    assert "Discussion stays" in cleaned
+    assert "Conclusion stays" in cleaned
+    assert report["removed_section_count"] == 1

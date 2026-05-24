@@ -35,11 +35,13 @@ from researchclaw.pipeline._helpers import (
     reconcile_figure_refs,
 )
 from researchclaw.pipeline.paper_contract import (
+    deduplicate_markdown_sections,
     find_paper_contract_violations,
     load_paper_contract,
     repair_paper_contract_violations,
     render_paper_contract_instruction,
     sanitize_paper_contract_violations,
+    sanitize_unsupported_mechanisms,
 )
 from researchclaw.pipeline.paper_integrity import (
     enforce_revision_integrity,
@@ -321,6 +323,13 @@ def _execute_paper_revision(
     )
     if _contract_instruction:
         data_integrity_revision += _contract_instruction
+    data_integrity_revision += (
+        "\nUNSUPPORTED MECHANISM RULE: Do NOT add or preserve mechanism names, "
+        "controllers, topology modules, density-ratio estimators, or named "
+        "subroutines unless they appear in the experiment code, experiment "
+        "summary, or paper contract. Remove unsupported PD-control, TQA, "
+        "persistence-diagram, or contamination-aware scoring claims.\n"
+    )
     _allowed_revision_citations = extract_bibtex_keys(
         _read_prior_references_bib(run_dir, current_stage_dir=stage_dir) or ""
     ) | extract_citation_keys(draft)
@@ -496,16 +505,52 @@ def _execute_paper_revision(
             )
             artifacts.append("revision_contract_repair.json")
             evidence_refs.append("stage-19/revision_contract_repair.json")
+    revised, _mechanism_sanitization = sanitize_unsupported_mechanisms(
+        revised,
+        run_dir,
+    )
+    if _mechanism_sanitization.get("sanitized"):
+        (stage_dir / "unsupported_mechanism_sanitization.json").write_text(
+            json.dumps(_mechanism_sanitization, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifacts.append("unsupported_mechanism_sanitization.json")
+        evidence_refs.append("stage-19/unsupported_mechanism_sanitization.json")
+    revised, _dedupe_report = deduplicate_markdown_sections(revised)
+    if _dedupe_report.get("sanitized"):
+        (stage_dir / "section_deduplication.json").write_text(
+            json.dumps(_dedupe_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        artifacts.append("section_deduplication.json")
+        evidence_refs.append("stage-19/section_deduplication.json")
     revised, _integrity_report = enforce_revision_integrity(
         draft=draft,
         revised=revised,
         allowed_citation_keys=_allowed_revision_citations,
         min_word_count=_revision_floor if _concise_revision else None,
     )
+    revised, _post_integrity_dedupe = deduplicate_markdown_sections(revised)
+    if _post_integrity_dedupe.get("sanitized"):
+        (stage_dir / "section_deduplication.json").write_text(
+            json.dumps(_post_integrity_dedupe, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if "section_deduplication.json" not in artifacts:
+            artifacts.append("section_deduplication.json")
+            evidence_refs.append("stage-19/section_deduplication.json")
+        _integrity_report["section_deduplication"] = {
+            "removed_section_count": _post_integrity_dedupe.get(
+                "removed_section_count",
+                0,
+            ),
+            "removed_sections": _post_integrity_dedupe.get("removed_sections", []),
+        }
     if (
         _integrity_report.get("removed_citation_keys")
         or _integrity_report.get("fallback_to_draft")
         or _integrity_report.get("too_short")
+        or _integrity_report.get("section_deduplication")
     ):
         (stage_dir / "revision_integrity_report.json").write_text(
             json.dumps(_integrity_report, indent=2, ensure_ascii=False),
@@ -1671,6 +1716,37 @@ def _execute_export_publish(
             "Stage 22: Fabrication sanitization — %d numbers replaced, %d kept",
             _san_report.get("numbers_replaced", 0),
             _san_report.get("numbers_kept", 0),
+        )
+    final_paper, _mechanism_sanitization = sanitize_unsupported_mechanisms(
+        final_paper,
+        run_dir,
+    )
+    if _mechanism_sanitization.get("sanitized"):
+        (stage_dir / "unsupported_mechanism_sanitization.json").write_text(
+            json.dumps(_mechanism_sanitization, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        _paper_integrity_report["unsupported_mechanism_sanitization"] = {
+            "removed_line_count": _mechanism_sanitization.get("removed_line_count", 0),
+            "active_mechanisms": _mechanism_sanitization.get("active_mechanisms", []),
+        }
+        logger.warning(
+            "Stage 22: Removed %d unsupported mechanism line(s)",
+            _mechanism_sanitization.get("removed_line_count", 0),
+        )
+    final_paper, _dedupe_report = deduplicate_markdown_sections(final_paper)
+    if _dedupe_report.get("sanitized"):
+        (stage_dir / "section_deduplication.json").write_text(
+            json.dumps(_dedupe_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        _paper_integrity_report["section_deduplication"] = {
+            "removed_section_count": _dedupe_report.get("removed_section_count", 0),
+            "removed_sections": _dedupe_report.get("removed_sections", []),
+        }
+        logger.warning(
+            "Stage 22: Removed %d duplicate section(s)",
+            _dedupe_report.get("removed_section_count", 0),
         )
 
     # Graceful degradation: insert notice only when quality gate was degraded

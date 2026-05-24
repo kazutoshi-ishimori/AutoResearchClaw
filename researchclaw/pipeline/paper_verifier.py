@@ -212,6 +212,9 @@ def verify_paper(
             if not math.isfinite(value):
                 continue
 
+            if _is_structural_reference_number(line, m.start(1)):
+                continue
+
             result.total_numbers_checked += 1
 
             # Always-allowed numbers
@@ -387,6 +390,23 @@ def _line_offset(lines: list[str], line_idx: int) -> int:
     return offset
 
 
+def _is_structural_reference_number(line: str, number_start: int) -> bool:
+    """Return True for numbering references such as ``Figure 6``.
+
+    These are document structure identifiers, not experimental measurements.
+    They should not consume paper-verifier evidence budget or trigger
+    fabrication rejection in strict sections.
+    """
+    prefix = line[max(0, number_start - 40):number_start]
+    return bool(
+        re.search(
+            r"\b(?:Figure|Fig\.|Table|Section|Appendix|Algorithm|Equation|Eq\.)\s*~?\s*$",
+            prefix,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _check_condition_names(
     tex_text: str,
     registry: VerifiedRegistry,
@@ -403,6 +423,7 @@ def _check_condition_names(
     # Look for condition-like names that appear in tables or bold text
     # This is heuristic — we look for unknown names that look like conditions
     known_lower = {name.lower() for name in registry.condition_names}
+    known_aliases = _condition_display_aliases(registry.condition_names)
 
     # Common generic terms that should NOT be flagged as fabricated conditions
     _GENERIC_TERMS = {
@@ -411,14 +432,20 @@ def _check_condition_names(
         "ours", "average", "mean", "std", "total",
         "baseline", "proposed", "ablation", "default",
         "results", "table", "figure", "section",
+        "hyperparameter", "target coverage", "stability penalty",
+        "pd gain", "base classifier", "value", "setting",
+        "coverage rate", "coverage gap", "average set size",
+        "avg set size", "stability index", "experimental configuration",
     }
 
     def _is_candidate(name: str) -> bool:
         """Check if a cleaned name looks like a real condition name."""
+        normalized = _normalize_condition_display_name(name)
         return bool(
             name
             and name.lower() not in known_lower
-            and name.lower() not in _GENERIC_TERMS
+            and normalized not in known_aliases
+            and normalized not in _GENERIC_TERMS
             and not name.startswith("\\")
             and len(name) > 1
             and not name.isdigit()
@@ -432,9 +459,17 @@ def _check_condition_names(
         return s.replace("\\_", "_").strip()
 
     _seen_names: set[str] = set()
+    table_ranges = _find_table_ranges(tex_text)
 
     # 1. Extract potential condition names from TABLE ROWS
     for i, line in enumerate(lines):
+        in_results_table = any(
+            start <= i <= end and is_results
+            for start, end, is_results in table_ranges
+        )
+        if table_ranges and not in_results_table:
+            if any(start <= i <= end for start, end, _ in table_ranges):
+                continue
         if "&" in line and "\\\\" in line:
             cells = line.split("&")
             if cells:
@@ -460,9 +495,13 @@ def _check_condition_names(
         section = _section_at_line(sections, i)
         if not section or section.lower() not in _strict_sections_lower:
             continue
+        if any(start <= i <= end for start, end, _ in table_ranges):
+            continue
         # Find \textbf{CondName} or \textit{CondName} in prose
         for m in re.finditer(r"\\text(?:bf|it)\{([^}]+)\}", line):
             cand_clean = _clean_latex(m.group(1)).strip()
+            if _is_structural_label(cand_clean):
+                continue
             # Only flag multi-word or snake_case names that look like conditions
             if (
                 _is_candidate(cand_clean)
@@ -479,6 +518,70 @@ def _check_condition_names(
                 )
 
     return fabricated
+
+
+def _is_structural_label(name: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*(?:Figure|Fig\.|Table|Section|Appendix|Algorithm|Equation|Eq\.)\s+\d+(?:\.\d+)?\.?\s*$",
+            name,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_condition_display_name(name: str) -> str:
+    """Normalize a display label so aliases can be matched conservatively."""
+    name = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", name)
+    name = name.replace("\\_", "_")
+    name = re.sub(r"[$`*{}]", "", name)
+    name = re.sub(r"[\s_\-]+", " ", name)
+    name = re.sub(r"[.:;,]+$", "", name)
+    return name.strip().lower()
+
+
+def _condition_display_aliases(condition_names: set[str]) -> set[str]:
+    """Build allowed paper-facing aliases for verified condition names."""
+    aliases: set[str] = set()
+    for raw_name in condition_names:
+        name = str(raw_name)
+        normalized = _normalize_condition_display_name(name)
+        if not normalized:
+            continue
+        aliases.add(normalized)
+        aliases.add(normalized.replace(" cp", " conformal prediction"))
+
+        tokens = set(normalized.split())
+        if {"split", "cp"} <= tokens:
+            aliases.update(
+                {
+                    "split cp",
+                    "split conformal prediction",
+                    "split cp baseline",
+                    "split conformal baseline",
+                }
+            )
+        if {"stability", "aware", "cp"} <= tokens:
+            aliases.update(
+                {
+                    "stability aware cp",
+                    "stability aware conformal prediction",
+                    "s cp",
+                    "scp",
+                    "stab cp",
+                    "stabcp",
+                }
+            )
+        if {"weighted", "cp"} <= tokens:
+            aliases.update(
+                {
+                    "weighted cp",
+                    "weighted conformal prediction",
+                    "w cp",
+                    "wcp",
+                }
+            )
+    return aliases
 
 
 def _check_training_config(

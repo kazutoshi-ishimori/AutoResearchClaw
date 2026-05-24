@@ -1865,6 +1865,39 @@ class TestWritePaperSections:
         assert "## PAPER CONTRACT" in merged
         assert "## CLAIM LEDGER" in merged
 
+    def test_results_prompt_avoids_forcing_unverified_tables_and_figure_numbers(self) -> None:
+        class PromptCaptureLLM:
+            def __init__(self):
+                self.user_prompts: list[str] = []
+
+            def chat(self, messages, **kwargs):
+                for m in messages:
+                    if m.get("role") == "user":
+                        self.user_prompts.append(m["content"])
+                from researchclaw.llm.client import LLMResponse
+                return LLMResponse(content="## Section\nContent here.", model="fake")
+
+        llm = PromptCaptureLLM()
+        from researchclaw.prompts import PromptManager
+        pm = PromptManager()
+
+        rc_executor._write_paper_sections(
+            llm=llm,
+            pm=pm,
+            preamble="Preamble",
+            topic_constraint="",
+            exp_metrics_instruction="## PRE-BUILT RESULTS TABLES\nverified table",
+            citation_instruction="",
+            outline="Outline",
+        )
+
+        results_prompt = llm.user_prompts[2]
+        assert "Do NOT create additional numeric results tables" in results_prompt
+        assert "Do NOT hand-number figures or tables" in results_prompt
+        assert "PER-REGIME table (Table 2)" not in results_prompt
+        assert "STATISTICAL COMPARISON table (Table 3)" not in results_prompt
+        assert "Figure 1" not in results_prompt
+
     def test_condition_summary_metric_lines_omit_invalid_set_sizes(self) -> None:
         lines = rc_executor._format_condition_summary_metric_lines(
             {
