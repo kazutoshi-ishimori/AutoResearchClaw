@@ -11,15 +11,24 @@ set -e
 MODE="${1:-skills_only}"
 PORT="${2:-30000}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-METACLAW_BIN="${METACLAW_BIN:-$REPO_ROOT/.venv/bin/metaclaw}"
+# Prefer a pip-installed `metaclaw` on PATH (see README: `pip install metaclaw`).
+# Otherwise fall back to a local checkout; override its location with METACLAW_DIR.
+if command -v metaclaw >/dev/null 2>&1; then
+    echo "Starting MetaClaw in ${MODE} mode on port ${PORT}..."
+    exec metaclaw start --mode "$MODE" --port "$PORT"
+fi
 
-if [ ! -x "$METACLAW_BIN" ]; then
-    echo "ERROR: metaclaw executable not found at $METACLAW_BIN"
-    echo "Run: $REPO_ROOT/.venv/bin/python -m pip install -e $REPO_ROOT/.external/MetaClaw"
+METACLAW_DIR="${METACLAW_DIR:-$HOME/MetaClaw}"
+VENV="$METACLAW_DIR/.venv"
+
+if [ ! -d "$VENV" ]; then
+    echo "ERROR: 'metaclaw' not on PATH and no venv found at $VENV"
+    echo "Either: pip install metaclaw"
+    echo "Or set METACLAW_DIR to your checkout and create its venv:"
+    echo "  cd \"\$METACLAW_DIR\" && python -m venv .venv && source .venv/bin/activate && pip install -e '.[evolve,embedding]'"
     exit 1
 fi
 
 echo "Starting MetaClaw in ${MODE} mode on port ${PORT}..."
-exec "$METACLAW_BIN" start --mode "$MODE" --port "$PORT"
+source "$VENV/bin/activate"
+exec metaclaw start --mode "$MODE" --port "$PORT"

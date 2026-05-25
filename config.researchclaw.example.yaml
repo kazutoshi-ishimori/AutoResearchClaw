@@ -190,6 +190,17 @@ experiment:
 prompts:
   custom_file: ""  # e.g. "my_prompts.yaml" (empty = use built-in defaults)
 
+  # Per-stage additional guidance. Each key is a stage name (run
+  # `researchclaw info` to see the full stage list); each value is either
+  # an inline instruction or a path to a text/markdown file. The text is
+  # appended to that stage's user prompt under "## Additional Stage
+  # Guidance". Unknown stage names emit a warning and are dropped.
+  #
+  #   extra_prompts:
+  #     code_generation: "Favour MadGraph5 + Pythia8 + Delphes toolchains."
+  #     paper_outline: ./prompts/jhep_outline_rules.md
+  extra_prompts: {}
+
 
 # === Skills (agentskills.io SKILL.md format) ===
 # ARC loads skills from builtin / user / project / MetaClaw / external dirs.
