@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -470,7 +471,23 @@ class OpenCodeBridge:
         # Use -m flag to specify model (more reliable than opencode.json)
         resolved_model = self._resolve_opencode_model()
         opencode_cmd = shutil.which("opencode") or "opencode"
-        cmd = [opencode_cmd, "run", "-m", resolved_model, "--format", "json", prompt]
+
+        # opencode CLI requires a TTY — when invoked via subprocess.run with
+        # piped stdout/stderr it silently does nothing (exits 0 with empty
+        # output and no files written). Wrap with `script` to provide a
+        # pseudo-TTY. Falls back to direct invocation if `script` is missing.
+        opencode_inner = " ".join(
+            shlex.quote(p) for p in [
+                opencode_cmd, "run", "-m", resolved_model,
+                "--format", "json", prompt,
+            ]
+        )
+        script_path = shutil.which("script")
+        if script_path:
+            cmd = [script_path, "-qc", opencode_inner, "/dev/null"]
+        else:
+            cmd = [opencode_cmd, "run", "-m", resolved_model,
+                   "--format", "json", prompt]
 
         t0 = time.monotonic()
         try:
