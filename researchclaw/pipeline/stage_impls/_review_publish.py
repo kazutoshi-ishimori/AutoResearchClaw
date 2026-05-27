@@ -1734,6 +1734,27 @@ def _execute_export_publish(
         final_paper, encoding="utf-8"
     )
 
+    # P1 (case 5): Strip evolution-overlay sections that leaked from
+    # paper_draft / paper_revision system prompts into the final text.
+    # The overlay (researchclaw/evolution.py:get_prompt_overlay) builds
+    # "## Lessons from Prior Runs" and "## Learned Skills from Prior Runs"
+    # markdown sections meant for LLM context, but mid-tier models often
+    # echo them as paper sections. Deterministic strip here guarantees they
+    # never reach paper_final.md regardless of model behavior.
+    _overlay_strip_pat = re.compile(
+        r"\n##\s+(?:Lessons from Prior Runs|Learned Skills from Prior Runs)"
+        r".*?(?=\n##\s|\Z)",
+        re.DOTALL,
+    )
+    _stripped_overlay = _overlay_strip_pat.subn("", final_paper)
+    if _stripped_overlay[1] > 0:
+        logger.info(
+            "Stage 22 P1: Stripped %d evolution-overlay section(s) "
+            "from final paper",
+            _stripped_overlay[1],
+        )
+        final_paper = _stripped_overlay[0]
+
     # Sanitize unverified data in tables — always-on, not just degraded mode
     final_paper, _san_report = _sanitize_fabricated_data(
         final_paper, run_dir
