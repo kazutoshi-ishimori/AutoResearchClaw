@@ -2358,19 +2358,29 @@ def _execute_export_publish(
                         set(_paper_integrity_report["removed_citation_keys"])
                         | still_invalid
                     )
-                    # IMP-29: Remove remaining unresolvable citations from
-                    # BOTH single-key and multi-key brackets.
+                    # P2 (case 5): visible-fail instead of silent removal.
+                    # Previously `final_paper.replace(f"[{bad_key}]", "")`
+                    # left dangling periods/spaces and made the LLM
+                    # hallucination invisible in the final PDF. Replacing
+                    # with **[?]** (bold question mark) renders as
+                    # \textbf{[?]} in LaTeX, signalling a missing reference
+                    # clearly to any reader. Multi-key brackets keep their
+                    # remaining good keys; only fully-emptied brackets get
+                    # the visible marker.
+                    _MISSING_CITE_MARKER = "**[?]**"
                     import re as _re_imp29
                     for bad_key in still_invalid:
-                        # Remove single-key brackets
-                        final_paper = final_paper.replace(f"[{bad_key}]", "")
+                        # Single-key brackets: visible marker, not silent drop
+                        final_paper = final_paper.replace(
+                            f"[{bad_key}]", _MISSING_CITE_MARKER
+                        )
                         # Remove from multi-key brackets: [good, BAD, good] → [good, good]
                         def _remove_from_multi(m: _re.Match) -> str:
                             inner = m.group(1)
                             parts = [p.strip() for p in _re.split(r"[,;]\s*", inner)]
                             filtered = [p for p in parts if p != bad_key]
                             if not filtered:
-                                return ""
+                                return _MISSING_CITE_MARKER
                             return "[" + ", ".join(filtered) + "]"
                         final_paper = _re_imp29.sub(
                             r"\[([^\]]*\b" + _re.escape(bad_key) + r"\b[^\]]*)\]",

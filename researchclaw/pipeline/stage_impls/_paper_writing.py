@@ -2206,6 +2206,15 @@ def _execute_paper_draft(
                     f"| ONLY cite this key when discussing: {title}"
                 )
         if cite_lines:
+            # P2 (case 5): Calibrate citation quantity to the actual list size.
+            # Hard-coding "25-40 references" pressured the LLM to fabricate
+            # cite_keys when the list was shorter (observed: 80-entry list
+            # but only 9 foundational keys actually cited, 7 of which were
+            # FABRICATED because the LLM "knew" they should exist).
+            _n_avail = len(cite_lines)
+            _target_min = max(5, min(25, _n_avail // 3 * 2))
+            _target_max = min(_n_avail, max(_target_min + 5, 40))
+            _related_work_min = max(3, min(15, _n_avail // 3))
             citation_instruction = (
                 "\n\nAVAILABLE REFERENCES (use [cite_key] to cite in the text):\n"
                 + "\n".join(cite_lines)
@@ -2222,9 +2231,18 @@ def _execute_paper_draft(
                 "  a mismatched reference.\n"
                 "- Each [cite_key] MUST correspond to the paper whose title is shown\n"
                 "  next to that key in the list above. Cross-check before citing.\n"
+                "- HARD PROHIBITION: Do NOT invent plausible-looking cite_keys for\n"
+                "  foundational works you remember from training data. Even if you\n"
+                "  KNOW that Guney 2016 / Menche 2015 / Barabasi 2011 exist, you may\n"
+                "  ONLY cite them with [cite_key] format if the exact key appears\n"
+                "  in the AVAILABLE REFERENCES list above. Otherwise use prose:\n"
+                "  'Guney and colleagues (2016) introduced shortest-path proximity'\n"
+                "  with NO brackets. Fabricated bracket keys are silently dropped\n"
+                "  downstream and ruin the paper's bibliography.\n"
                 "\nCITATION QUANTITY & QUALITY CONSTRAINTS:\n"
-                "- Cite 25-40 unique references in the paper body. The Related Work\n"
-                "  section alone should cite at least 15 references.\n"
+                f"- Cite {_target_min}-{_target_max} unique references in the paper "
+                f"body (calibrated to the {_n_avail} available references). The Related Work\n"
+                f"  section alone should cite at least {_related_work_min} references.\n"
                 "- Every citation MUST be directly relevant to the paper's topic.\n"
                 "- DO NOT cite papers from unrelated domains (wireless communication, "
                 "manufacturing, UAV, etc.).\n"
