@@ -711,6 +711,65 @@ def _execute_quality_gate(
     if report is None:
         report = _default_quality_report(config.research.quality_threshold)
     report.setdefault("generated", _utcnow_iso())
+
+    # P3 (case 5): citation_match_rate audit — Stage 23 only verifies bib
+    # entries (false positive when bib has 5 entries but draft cites 40+
+    # fabricated keys). Here we compute the deterministic match rate between
+    # bracket [cite_key] tokens in the revised paper and entries in the
+    # upstream references.bib. Low rates indicate the LLM is fabricating
+    # keys that Stage 22 will silently drop, ruining the bibliography.
+    try:
+        _bib_text_p3 = _read_prior_references_bib(
+            run_dir, current_stage_dir=stage_dir
+        ) or ""
+        _bib_keys_p3 = set(re.findall(r"@\w+\{([^,]+),", _bib_text_p3))
+        _cite_key_pat_p3 = r"[a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z0-9_-]*"
+        _cited_keys_p3: set[str] = set()
+        for _bm in re.finditer(r"\[([^\]]+)\]", revised):
+            _inner = _bm.group(1)
+            _parts = [p.strip() for p in re.split(r"[,;]\s*", _inner)]
+            if _parts and all(
+                re.fullmatch(_cite_key_pat_p3, p) for p in _parts if p
+            ):
+                _cited_keys_p3.update(_parts)
+        if _cited_keys_p3:
+            _matched_p3 = _cited_keys_p3 & _bib_keys_p3
+            _match_rate_p3 = len(_matched_p3) / len(_cited_keys_p3)
+        else:
+            _matched_p3 = set()
+            _match_rate_p3 = 1.0  # no cites = no mismatch
+        report["citation_match"] = {
+            "draft_unique_keys": len(_cited_keys_p3),
+            "bib_unique_keys": len(_bib_keys_p3),
+            "matched_keys": len(_matched_p3),
+            "match_rate": round(_match_rate_p3, 4),
+            "unmatched_keys_sample": sorted(
+                _cited_keys_p3 - _bib_keys_p3
+            )[:15],
+        }
+        if _cited_keys_p3 and _match_rate_p3 < 0.7:
+            _cite_score_cap = 4.0
+            _orig_score_p3 = report.get("score_1_to_10", 5)
+            if (
+                isinstance(_orig_score_p3, (int, float))
+                and _orig_score_p3 > _cite_score_cap
+            ):
+                report["score_1_to_10"] = _cite_score_cap
+                report.setdefault("weaknesses", []).append(
+                    f"Citation match rate {_match_rate_p3:.2f} below 0.7 — "
+                    f"{len(_cited_keys_p3) - len(_matched_p3)} fabricated "
+                    f"cite_keys will be silently dropped or replaced with "
+                    f"missing markers at Stage 22 (paper bibliography "
+                    f"unreliable)."
+                )
+                logger.warning(
+                    "P3: citation_match_rate %.2f below threshold 0.7; "
+                    "capping quality score from %.1f to %.1f",
+                    _match_rate_p3, float(_orig_score_p3), _cite_score_cap,
+                )
+    except Exception as _p3_exc:
+        logger.warning("P3 citation audit failed: %s", _p3_exc)
+
     (stage_dir / "quality_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
