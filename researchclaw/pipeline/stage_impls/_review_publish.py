@@ -1433,6 +1433,26 @@ def _resolve_missing_citations(
 # Stage 22: Export & Publish
 # ---------------------------------------------------------------------------
 
+# Evolution-overlay sections injected into paper_draft / paper_revision system
+# prompts (see researchclaw/evolution.py:get_prompt_overlay). They are meant for
+# LLM context only, but mid-tier models sometimes echo them into the paper body.
+# A real "## Lessons Learned" paper section uses a different heading and is NOT
+# matched. The section runs until the next "## " heading or end-of-text (\Z).
+_EVOLUTION_OVERLAY_STRIP_PAT = re.compile(
+    r"\n##\s+(?:Lessons from Prior Runs|Learned Skills from Prior Runs)"
+    r".*?(?=\n##\s|\Z)",
+    re.DOTALL,
+)
+
+
+def _strip_evolution_overlay(text: str) -> tuple[str, int]:
+    """Remove leaked evolution-overlay sections from *text*.
+
+    Returns ``(cleaned_text, num_sections_removed)``.
+    """
+    return _EVOLUTION_OVERLAY_STRIP_PAT.subn("", text)
+
+
 def _execute_export_publish(
     stage_dir: Path,
     run_dir: Path,
@@ -1492,6 +1512,17 @@ def _execute_export_publish(
     (stage_dir / "paper_presanitized.md").write_text(
         final_paper, encoding="utf-8"
     )
+
+    # P1 (case 5): Strip evolution-overlay sections that leaked from
+    # paper_draft / paper_revision system prompts into the final text
+    # (see _strip_evolution_overlay above). Deterministic strip here guarantees
+    # they never reach paper_final.md regardless of model behaviour.
+    final_paper, _n_overlay = _strip_evolution_overlay(final_paper)
+    if _n_overlay > 0:
+        logger.info(
+            "Stage 22 P1: Stripped %d evolution-overlay section(s) from final paper",
+            _n_overlay,
+        )
 
     # Sanitize unverified data in tables — always-on, not just degraded mode
     final_paper, _san_report = _sanitize_fabricated_data(
