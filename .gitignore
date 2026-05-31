@@ -34,6 +34,8 @@ config_run*.yaml
 config_agent_*.yaml
 config_case*.yaml
 config_v8_case*.yaml
+# Local-LLM tabular configs (ollama / groq / openrouter variants — local only)
+config.*-tabular.yaml
 pipeline_run_*.log
 
 # Sensitive / credentials
@@ -48,6 +50,18 @@ setenv*.sh
 
 # Literature search cache
 .researchclaw_cache/
+
+# Local research data — never commit. DrugBank Academic license forbids
+# redistribution; raw downloads stay local-only.
+/data/
+
+# Local-only scratch: isolated clones, proxy logs, codex state, search cache,
+# and reference material — never committed.
+.external/
+.codex
+.metaclaw_proxy.log
+researchclaw/data/code_search_cache/
+/参考資料/
 
 # Local pipeline state: sessions, saved ideas, experiment cache (local only)
 .researchclaw/
