@@ -546,6 +546,35 @@ class CliAgentConfig:
 
 
 @dataclass(frozen=True)
+class BiomniConfig:
+    """Biomni bridge settings (Phase 0 of the B+(1-5) design).
+
+    Biomni runs under experiment mode ``agentic``: ARC's own agent
+    orchestrates a curated allowlist of Biomni tools exposed over an MCP
+    bridge (``server_cmd``), while every tool invocation is recorded to the
+    provenance ledger (``provenance_path``) by the bridge.  The entity-DB
+    paths feed the layer-② ID gate; ``drug_hashes_db`` holds sha256 hashes
+    only, so the licensed DrugBank ID space is never stored in plaintext.
+    """
+
+    # Command that launches the Biomni MCP bridge (empty = bridge disabled).
+    server_cmd: str = ""
+    # Curated subset of Biomni tools the agent is allowed to call.
+    tool_allowlist: tuple[str, ...] = ()
+    # Provenance ledger path (relative to the experiment workspace).
+    provenance_path: str = "provenance.jsonl"
+    # Authoritative reference sets for the entity-ID gate (layer ②).
+    gene_db: str = ""
+    drug_hashes_db: str = ""  # sha256 hashes only — DrugBank hash-only policy
+    pathway_db: str = ""
+    # Deterministic replay gate (layer ③) — off in Phase 0.
+    replay_enabled: bool = False
+    replay_tolerance: float = 1e-9
+    # Headline metrics to independently recompute (layer ④) — empty in Phase 0.
+    recompute_headline_metrics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     mode: str = "simulated"
     time_budget_sec: int = 300
@@ -560,6 +589,7 @@ class ExperimentConfig:
     collider_agent: ColliderAgentConfig = field(default_factory=ColliderAgentConfig)
     biology_agent: BiologyAgentConfig = field(default_factory=BiologyAgentConfig)
     stat_agent: StatAgentConfig = field(default_factory=StatAgentConfig)
+    biomni: BiomniConfig = field(default_factory=BiomniConfig)
     ssh_remote: SshRemoteConfig = field(default_factory=SshRemoteConfig)
     colab_drive: ColabDriveConfig = field(default_factory=ColabDriveConfig)
     code_agent: CodeAgentConfig = field(default_factory=CodeAgentConfig)
@@ -1254,6 +1284,28 @@ def _parse_stat_agent_config(data: dict[str, Any]) -> StatAgentConfig:
     )
 
 
+def _parse_biomni_config(data: dict[str, Any]) -> BiomniConfig:
+    if not data:
+        return BiomniConfig()
+    allow_raw = data.get("tool_allowlist", ())
+    if isinstance(allow_raw, str):
+        allow_raw = [allow_raw]
+    recompute_raw = data.get("recompute_headline_metrics", ())
+    if isinstance(recompute_raw, str):
+        recompute_raw = [recompute_raw]
+    return BiomniConfig(
+        server_cmd=data.get("server_cmd", ""),
+        tool_allowlist=tuple(allow_raw),
+        provenance_path=data.get("provenance_path", "provenance.jsonl"),
+        gene_db=data.get("gene_db", ""),
+        drug_hashes_db=data.get("drug_hashes_db", ""),
+        pathway_db=data.get("pathway_db", ""),
+        replay_enabled=bool(data.get("replay_enabled", False)),
+        replay_tolerance=float(data.get("replay_tolerance", 1e-9)),
+        recompute_headline_metrics=tuple(recompute_raw),
+    )
+
+
 def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
     sandbox_data = data.get("sandbox") or {}
     docker_data = data.get("docker") or {}
@@ -1322,6 +1374,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         agentic=_parse_agentic_config(data.get("agentic") or {}),
         collider_agent=_parse_collider_agent_config(data.get("collider_agent") or {}),
         biology_agent=_parse_biology_agent_config(data.get("biology_agent") or {}),
+        biomni=_parse_biomni_config(data.get("biomni") or {}),
         stat_agent=_parse_stat_agent_config(data.get("stat_agent") or {}),
         code_agent=_parse_code_agent_config(data.get("code_agent") or {}),
         opencode=_parse_opencode_config(data.get("opencode") or {}),

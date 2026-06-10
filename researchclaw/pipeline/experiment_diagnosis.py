@@ -37,6 +37,8 @@ class DeficiencyType(enum.Enum):
     PERMISSION_ERROR = "permission_error"
     DATASET_UNAVAILABLE = "dataset_unavailable"
     GPU_OOM = "gpu_oom"
+    FABRICATED_METRIC = "fabricated_metric"  # Biomni bridge layer ⑤
+    UNKNOWN_ENTITY = "unknown_entity"  # Biomni bridge layer ②
 
 
 @dataclass
@@ -339,6 +341,53 @@ def diagnose_experiment(
 # ---------------------------------------------------------------------------
 # Individual check functions
 # ---------------------------------------------------------------------------
+
+
+def add_biomni_verification_deficiencies(
+    diag: ExperimentDiagnosis,
+    *,
+    claim_binding: Any = None,
+    entity: Any = None,
+) -> ExperimentDiagnosis:
+    """Fold Biomni bridge gate results into *diag* as critical deficiencies.
+
+    ``claim_binding`` (layer ⑤) and ``entity`` (layer ②) are duck-typed:
+    each is expected to expose ``.ok`` plus, respectively, ``.unbacked``
+    (``list[(key, value)]``) and ``.unknown`` (``dict[kind, list[id]]``).
+    Any failure is recorded as a *critical* deficiency so the existing
+    fail-loud machinery (:meth:`ExperimentDiagnosis.has_critical`) halts the
+    pipeline before a paper is written on unverified numbers.
+    """
+    if claim_binding is not None and not claim_binding.ok:
+        for key, value in claim_binding.unbacked:
+            diag.deficiencies.append(Deficiency(
+                type=DeficiencyType.FABRICATED_METRIC,
+                severity="critical",
+                description=(
+                    f"Metric '{key}'={value} has no provenance ledger backing: "
+                    f"no recorded Biomni tool return produced this value."
+                ),
+                suggested_fix=(
+                    "Trace the number to a real tool call, or remove the claim. "
+                    "Do not report values the bridge never observed."
+                ),
+            ))
+    if entity is not None and not entity.ok:
+        for kind, ids in entity.unknown.items():
+            diag.deficiencies.append(Deficiency(
+                type=DeficiencyType.UNKNOWN_ENTITY,
+                severity="critical",
+                description=(
+                    f"Unrecognised {kind} identifier(s): {', '.join(map(str, ids))} "
+                    f"not found in the authoritative reference set."
+                ),
+                affected_conditions=[],
+                suggested_fix=(
+                    f"Verify the {kind} ID against the canonical database; "
+                    f"a mismatch here means the wrong entity was analysed."
+                ),
+            ))
+    return diag
 
 
 def _check_missing_deps(diag: ExperimentDiagnosis, output: str) -> None:
