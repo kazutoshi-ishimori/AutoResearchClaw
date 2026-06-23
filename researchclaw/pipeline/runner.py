@@ -283,16 +283,63 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
         # Run quality assessment
         qa = assess_experiment_quality(summary, ref_log)
 
+        # --- Biomni bridge verification (Phase 0, layers ⑤ + ②) ---
+        # If an agentic Biomni flow recorded a provenance ledger, bind the
+        # reported numbers to it and check claimed entity IDs against the
+        # reference DBs.  A fabricated metric / unknown ID becomes a *critical*
+        # deficiency so the fail-loud path halts before a paper is written on
+        # numbers no tool ever produced.  No-op when Biomni is not in use.
+        biomni_report: dict | None = None
+        biomni_failed = False
+        try:
+            from researchclaw.experiment.verify.stage_hook import (
+                build_entity_gate,
+                resolve_ledger_path,
+                run_biomni_gates,
+            )
+            from researchclaw.pipeline.experiment_diagnosis import (
+                add_biomni_verification_deficiencies,
+            )
+
+            _biomni_cfg = config.experiment.biomni
+            _ledger = resolve_ledger_path(_biomni_cfg, run_dir)
+            _gate = build_entity_gate(_biomni_cfg, Path.cwd())
+            if _ledger is not None or _gate is not None:
+                _cb, _er = run_biomni_gates(summary, ledger_path=_ledger, gate=_gate)
+                add_biomni_verification_deficiencies(diag, claim_binding=_cb, entity=_er)
+                biomni_failed = (_cb is not None and not _cb.ok) or (
+                    _er is not None and not _er.ok
+                )
+                biomni_report = {
+                    "ledger": str(_ledger) if _ledger else None,
+                    "claim_binding": _cb.summary() if _cb is not None else None,
+                    "entity_gate": _er.summary() if _er is not None else None,
+                    "ok": not biomni_failed,
+                }
+                if biomni_failed:
+                    logger.warning(
+                        "Biomni verification FAILED — %s",
+                        biomni_report["claim_binding"] or biomni_report["entity_gate"],
+                    )
+        except Exception as _biomni_exc:  # never break the base diagnosis
+            logger.warning("Biomni verification skipped: %s", _biomni_exc)
+
         # Save diagnosis report
+        _deficiency_types = [d.type.value for d in qa.deficiencies]
+        if biomni_failed:
+            _deficiency_types = sorted(
+                {d.type.value for d in diag.deficiencies} | set(_deficiency_types)
+            )
         diag_report = {
             "diagnosis": diag.to_dict(),
             "quality_assessment": {
                 "mode": qa.mode.value,
                 "sufficient": qa.sufficient,
                 "repair_possible": qa.repair_possible,
-                "deficiency_types": [d.type.value for d in qa.deficiencies],
+                "deficiency_types": _deficiency_types,
             },
-            "repair_needed": not qa.sufficient,
+            "biomni_verification": biomni_report,
+            "repair_needed": (not qa.sufficient) or biomni_failed,
             "generated": _utcnow_iso(),
         }
         (run_dir / "experiment_diagnosis.json").write_text(
