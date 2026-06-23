@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from researchclaw.experiment.verify.claim_binding import ClaimBindingReport
 from researchclaw.experiment.verify.entity_gate import EntityReport
+from researchclaw.experiment.verify.recompute import RecomputeReport
+from researchclaw.experiment.verify.replay import ReplayReport
 from researchclaw.pipeline.experiment_diagnosis import (
     DeficiencyType,
     ExperimentDiagnosis,
@@ -38,12 +40,36 @@ def test_unknown_entity_becomes_critical_deficiency() -> None:
     assert any("DB99999" in d.description for d in diag.deficiencies)
 
 
+def test_nonreproducible_tool_becomes_critical_deficiency() -> None:
+    diag = ExperimentDiagnosis()
+    replay = ReplayReport(drifted=[("query_kegg", "sha_a", "sha_b")])
+    add_biomni_verification_deficiencies(diag, replay=replay)
+
+    assert diag.has_critical()
+    types = [d.type for d in diag.deficiencies]
+    assert DeficiencyType.NONREPRODUCIBLE_TOOL in types
+    assert any("query_kegg" in d.description for d in diag.deficiencies)
+
+
+def test_recompute_mismatch_becomes_critical_deficiency() -> None:
+    diag = ExperimentDiagnosis()
+    recompute = RecomputeReport(mismatched=[("auroc", 0.78, 0.55)])
+    add_biomni_verification_deficiencies(diag, recompute=recompute)
+
+    assert diag.has_critical()
+    types = [d.type for d in diag.deficiencies]
+    assert DeficiencyType.RECOMPUTE_MISMATCH in types
+    assert any("auroc" in d.description for d in diag.deficiencies)
+
+
 def test_clean_reports_add_no_deficiencies() -> None:
     diag = ExperimentDiagnosis()
     add_biomni_verification_deficiencies(
         diag,
         claim_binding=ClaimBindingReport(backed=[("proximity", 0.42)]),
         entity=EntityReport(),
+        replay=ReplayReport(matched=["query_uniprot"]),
+        recompute=RecomputeReport(verified=[("auroc", 0.78, 0.78)]),
     )
     assert not diag.has_critical()
     assert diag.deficiencies == []

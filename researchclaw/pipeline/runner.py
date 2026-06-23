@@ -283,12 +283,16 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
         # Run quality assessment
         qa = assess_experiment_quality(summary, ref_log)
 
-        # --- Biomni bridge verification (Phase 0, layers ⑤ + ②) ---
+        # --- Biomni bridge verification (Phase 0/1, layers ⑤ ② ③) ---
         # If an agentic Biomni flow recorded a provenance ledger, bind the
-        # reported numbers to it and check claimed entity IDs against the
-        # reference DBs.  A fabricated metric / unknown ID becomes a *critical*
-        # deficiency so the fail-loud path halts before a paper is written on
-        # numbers no tool ever produced.  No-op when Biomni is not in use.
+        # reported numbers to it (⑤), check claimed entity IDs against the
+        # reference DBs (②), and — when replay_enabled — re-execute the
+        # recorded tool calls in the isolated Biomni venv to confirm they
+        # reproduce (③).  Any failure becomes a *critical* deficiency so the
+        # fail-loud path halts before a paper is written on numbers no tool
+        # ever produced.  No-op when Biomni is not in use.  (Layer ④ recompute
+        # is experiment-specific — its oracles are registered by the experiment
+        # code, not generically here.)
         biomni_report: dict | None = None
         biomni_failed = False
         try:
@@ -307,19 +311,52 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
             if _ledger is not None or _gate is not None:
                 _cb, _er = run_biomni_gates(summary, ledger_path=_ledger, gate=_gate)
                 add_biomni_verification_deficiencies(diag, claim_binding=_cb, entity=_er)
-                biomni_failed = (_cb is not None and not _cb.ok) or (
-                    _er is not None and not _er.ok
+
+                # Layer ③ — deterministic replay (opt-in; re-runs real tools).
+                _replay = None
+                if (
+                    _biomni_cfg.replay_enabled
+                    and _ledger is not None
+                    and _biomni_cfg.server_cmd
+                ):
+                    from researchclaw.experiment.verify.biomni_runner import (
+                        BiomniSubprocessRunner,
+                        tool_modules_from_allowlist,
+                    )
+                    from researchclaw.experiment.verify.replay import replay_ledger
+
+                    _tmods = tool_modules_from_allowlist(_biomni_cfg.tool_allowlist)
+                    _runner = BiomniSubprocessRunner(
+                        server_cmd=_biomni_cfg.server_cmd,
+                        tool_modules=_tmods,
+                        ledger_path=run_dir / "replay_scratch.jsonl",
+                    )
+                    _replay = replay_ledger(
+                        _ledger,
+                        _runner,
+                        tol=_biomni_cfg.replay_tolerance,
+                        tools=set(_tmods) or None,
+                    )
+                    add_biomni_verification_deficiencies(diag, replay=_replay)
+
+                biomni_failed = (
+                    (_cb is not None and not _cb.ok)
+                    or (_er is not None and not _er.ok)
+                    or (_replay is not None and not _replay.ok)
                 )
                 biomni_report = {
                     "ledger": str(_ledger) if _ledger else None,
                     "claim_binding": _cb.summary() if _cb is not None else None,
                     "entity_gate": _er.summary() if _er is not None else None,
+                    "replay": _replay.summary() if _replay is not None else None,
                     "ok": not biomni_failed,
                 }
                 if biomni_failed:
                     logger.warning(
                         "Biomni verification FAILED — %s",
-                        biomni_report["claim_binding"] or biomni_report["entity_gate"],
+                        biomni_report["claim_binding"]
+                        or biomni_report["entity_gate"]
+                        or biomni_report["replay"],
                     )
         except Exception as _biomni_exc:  # never break the base diagnosis
             logger.warning("Biomni verification skipped: %s", _biomni_exc)

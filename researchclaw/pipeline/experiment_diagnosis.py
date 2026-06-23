@@ -39,6 +39,8 @@ class DeficiencyType(enum.Enum):
     GPU_OOM = "gpu_oom"
     FABRICATED_METRIC = "fabricated_metric"  # Biomni bridge layer ⑤
     UNKNOWN_ENTITY = "unknown_entity"  # Biomni bridge layer ②
+    NONREPRODUCIBLE_TOOL = "nonreproducible_tool"  # Biomni bridge layer ③
+    RECOMPUTE_MISMATCH = "recompute_mismatch"  # Biomni bridge layer ④
 
 
 @dataclass
@@ -348,12 +350,16 @@ def add_biomni_verification_deficiencies(
     *,
     claim_binding: Any = None,
     entity: Any = None,
+    replay: Any = None,
+    recompute: Any = None,
 ) -> ExperimentDiagnosis:
     """Fold Biomni bridge gate results into *diag* as critical deficiencies.
 
-    ``claim_binding`` (layer ⑤) and ``entity`` (layer ②) are duck-typed:
-    each is expected to expose ``.ok`` plus, respectively, ``.unbacked``
-    (``list[(key, value)]``) and ``.unknown`` (``dict[kind, list[id]]``).
+    The four Phase 0/1 gates are duck-typed by their report objects:
+      * ``claim_binding`` (⑤) — ``.ok`` + ``.unbacked`` (``list[(key, value)]``)
+      * ``entity``        (②) — ``.ok`` + ``.unknown`` (``dict[kind, list[id]]``)
+      * ``replay``        (③) — ``.ok`` + ``.drifted`` (``list[(tool, sha, sha)]``)
+      * ``recompute``     (④) — ``.ok`` + ``.mismatched`` (``list[(name, claimed, recomputed)]``)
     Any failure is recorded as a *critical* deficiency so the existing
     fail-loud machinery (:meth:`ExperimentDiagnosis.has_critical`) halts the
     pipeline before a paper is written on unverified numbers.
@@ -385,6 +391,36 @@ def add_biomni_verification_deficiencies(
                 suggested_fix=(
                     f"Verify the {kind} ID against the canonical database; "
                     f"a mismatch here means the wrong entity was analysed."
+                ),
+            ))
+    if replay is not None and not replay.ok:
+        for tool, recorded_sha, replay_sha in replay.drifted:
+            diag.deficiencies.append(Deficiency(
+                type=DeficiencyType.NONREPRODUCIBLE_TOOL,
+                severity="critical",
+                description=(
+                    f"Tool '{tool}' did not reproduce on replay: ledger anchor "
+                    f"{recorded_sha[:12]} vs replay {replay_sha[:12]}."
+                ),
+                suggested_fix=(
+                    "A recorded result could not be reproduced — the tool is "
+                    "non-deterministic or the ledger was altered. Pin the tool's "
+                    "inputs/seed, or exclude it from replay if legitimately stochastic."
+                ),
+            ))
+    if recompute is not None and not recompute.ok:
+        for name, claimed, recomputed in recompute.mismatched:
+            diag.deficiencies.append(Deficiency(
+                type=DeficiencyType.RECOMPUTE_MISMATCH,
+                severity="critical",
+                description=(
+                    f"Metric '{name}'={claimed} disagrees with the independent "
+                    f"recomputation ({recomputed}): the numbers are real but were "
+                    f"combined incorrectly."
+                ),
+                suggested_fix=(
+                    "Reconcile the reported metric with the oracle derivation; "
+                    "the aggregation/formula, not the raw tool calls, is wrong."
                 ),
             ))
     return diag

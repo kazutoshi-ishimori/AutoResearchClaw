@@ -23,12 +23,12 @@ def test_parses_biomni_block() -> None:
     exp = _parse_experiment_config(
         {
             "biomni": {
-                "server_cmd": "conda run -n biomni_env python external/biomni_bridge/biomni_mcp_server.py",
-                "tool_allowlist": ["network_proximity", "query_gene"],
+                "server_cmd": "~/workspace/Biomni/.venv/bin/python external/biomni_bridge/biomni_tool_runner.py",
+                "tool_allowlist": ["database.query_uniprot", "database.query_kegg"],
                 "provenance_path": "provenance.jsonl",
-                "gene_db": "data/refs/hgnc.tsv",
+                "gene_db": "data/refs/genes_human.tsv",
                 "drug_hashes_db": "data/refs/drugbank_ids.sha256",
-                "pathway_db": "data/refs/reactome.tsv",
+                "pathway_db": "data/refs/pathways_kegg2021.tsv",
                 "replay_enabled": True,
                 "replay_tolerance": 1e-6,
                 "recompute_headline_metrics": ["proximity_z"],
@@ -36,9 +36,9 @@ def test_parses_biomni_block() -> None:
         }
     )
     b = exp.biomni
-    assert b.server_cmd.startswith("conda run")
-    assert b.tool_allowlist == ("network_proximity", "query_gene")
-    assert b.gene_db == "data/refs/hgnc.tsv"
+    assert "biomni_tool_runner.py" in b.server_cmd
+    assert b.tool_allowlist == ("database.query_uniprot", "database.query_kegg")
+    assert b.gene_db == "data/refs/genes_human.tsv"
     assert b.drug_hashes_db.endswith(".sha256")
     assert b.replay_enabled is True
     assert b.replay_tolerance == 1e-6
