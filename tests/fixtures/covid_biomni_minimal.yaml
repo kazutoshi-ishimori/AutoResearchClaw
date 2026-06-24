@@ -1,0 +1,47 @@
+# Minimal fixture: COVID workspace biomni-mode config skeleton.
+# Mirrors the wiring of workspaces/covid-repurposing-paper/config_covid_biomni.yaml
+# (which is gitignored as workspaces/* are local-only). This fixture exists so the
+# load path stays gated by CI — keep them in sync when changing biomni keys.
+
+project:
+  name: "covid-repurposing-biomni"
+  mode: "full-auto"
+
+research:
+  topic: "Biomni-bridge integration regression fixture"
+
+runtime:
+  timezone: "Asia/Tokyo"
+
+notifications:
+  channel: "console"
+
+knowledge_base:
+  backend: "markdown"
+  root: "docs/kb"
+
+llm:
+  provider: "openai-compatible"
+  base_url: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"
+  primary_model: "gpt-5.4-mini"
+
+experiment:
+  mode: "agentic"
+  time_budget_sec: 1800
+  metric_key: "auroc_phase2plus"
+  metric_direction: "maximize"
+  biomni:
+    server_cmd: "/home/ishimori/workspace/Biomni/.venv/bin/python external/biomni_bridge/biomni_tool_runner.py"
+    tool_allowlist:
+      - "database.query_uniprot"
+      - "database.query_kegg"
+      - "database.query_stringdb"
+    provenance_path: "provenance.jsonl"
+    gene_db: "data/refs/genes_human.tsv"
+    drug_hashes_db: "data/refs/drugbank_ids.sha256"
+    pathway_db: "data/refs/pathways_kegg2021.tsv"
+    replay_enabled: true
+    replay_tolerance: 1.0e-9
+    recompute_headline_metrics:
+      - "auroc_phase2plus"
