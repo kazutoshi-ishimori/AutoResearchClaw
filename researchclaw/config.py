@@ -572,6 +572,12 @@ class BiomniConfig:
     replay_tolerance: float = 1e-9
     # Headline metrics to independently recompute (layer ④) — empty in Phase 0.
     recompute_headline_metrics: tuple[str, ...] = ()
+    # Phase 2 (②): host-bridge URL for containerised agentic flows. When empty,
+    # the legacy direct-subprocess path (Phase 1) is used. When set, the
+    # container-side ``biomni_client.py`` POSTs tool calls to this URL and the
+    # host daemon writes the provenance ledger — keeping the ledger out of the
+    # untrusted container.
+    bridge_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -1303,6 +1309,7 @@ def _parse_biomni_config(data: dict[str, Any]) -> BiomniConfig:
         replay_enabled=bool(data.get("replay_enabled", False)),
         replay_tolerance=float(data.get("replay_tolerance", 1e-9)),
         recompute_headline_metrics=tuple(recompute_raw),
+        bridge_url=data.get("bridge_url", ""),
     )
 
 

@@ -17,6 +17,8 @@ def test_defaults_when_no_biomni_block() -> None:
     assert exp.biomni.provenance_path == "provenance.jsonl"
     assert exp.biomni.tool_allowlist == ()
     assert exp.biomni.replay_enabled is False
+    # Phase 2: empty bridge_url = legacy direct-subprocess path (Phase 1).
+    assert exp.biomni.bridge_url == ""
 
 
 def test_parses_biomni_block() -> None:
@@ -43,6 +45,14 @@ def test_parses_biomni_block() -> None:
     assert b.replay_enabled is True
     assert b.replay_tolerance == 1e-6
     assert b.recompute_headline_metrics == ("proximity_z",)
+
+
+def test_parses_bridge_url_for_phase2_container_routing() -> None:
+    """When the agentic flow runs containerised, tool calls go via the host bridge."""
+    exp = _parse_experiment_config(
+        {"biomni": {"bridge_url": "http://host.docker.internal:8765"}}
+    )
+    assert exp.biomni.bridge_url == "http://host.docker.internal:8765"
 
 
 def test_tool_allowlist_accepts_single_string() -> None:
