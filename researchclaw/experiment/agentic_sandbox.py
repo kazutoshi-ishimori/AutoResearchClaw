@@ -14,6 +14,8 @@ import os
 import subprocess
 import threading
 import time
+import urllib.parse
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +23,24 @@ from researchclaw.config import AgenticConfig
 from researchclaw.experiment.sandbox import SandboxResult, parse_metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _rewrite_loopback_for_container(url: str) -> str:
+    """Rewrite a host-loopback URL so a container can reach the host bridge.
+
+    The host-side bridge daemon listens on ``127.0.0.1``; from inside Docker,
+    that loopback points at the container itself. We swap it for
+    ``host.docker.internal``, which Docker resolves to the host gateway when
+    paired with ``--add-host=host.docker.internal:host-gateway`` on Linux.
+    Non-loopback hostnames (already-routable bridges) are returned unchanged.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return url
+    netloc = "host.docker.internal"
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
 
 _CONTAINER_COUNTER = 0
 _counter_lock = threading.Lock()
@@ -56,11 +76,16 @@ class AgenticSandbox:
         config: AgenticConfig,
         workdir: Path,
         skills_dir: Path | None = None,
+        bridge_lifecycle: AbstractContextManager[str] | None = None,
     ) -> None:
         self.config = config
         self.workdir = workdir.resolve()
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.skills_dir = skills_dir
+        # Phase 2 ②-b: optional host-bridge daemon lifecycle. When supplied,
+        # the bridge is started before the container and torn down after,
+        # and its URL is injected into the container via ``BIOMNI_BRIDGE_URL``.
+        self._bridge_lifecycle = bridge_lifecycle
         self._container_name: str | None = None
 
     # -- public API ----------------------------------------------------------
@@ -88,9 +113,25 @@ class AgenticSandbox:
         workspace.mkdir(parents=True, exist_ok=True)
 
         start = time.monotonic()
+        bridge = self._bridge_lifecycle
+        bridge_url_for_container: str | None = None
+        if bridge is not None:
+            try:
+                raw_url = bridge.__enter__()
+            except Exception as exc:  # noqa: BLE001 — surface as session failure
+                logger.exception("Bridge lifecycle failed to start: %s", exc)
+                return AgenticResult(
+                    returncode=-1,
+                    stdout="",
+                    stderr=f"bridge lifecycle failed: {exc}",
+                    elapsed_sec=time.monotonic() - start,
+                )
+            bridge_url_for_container = _rewrite_loopback_for_container(raw_url)
         try:
             # 1. Start the container
-            self._start_container(container, workspace)
+            self._start_container(
+                container, workspace, bridge_url=bridge_url_for_container
+            )
 
             # 2. Install agent CLI
             if self.config.agent_install_cmd:
@@ -160,6 +201,11 @@ class AgenticSandbox:
                 elapsed_sec=elapsed,
             )
         finally:
+            if bridge is not None:
+                try:
+                    bridge.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001 — never let teardown mask the result
+                    logger.warning("Bridge lifecycle exit raised", exc_info=True)
             self._cleanup_container(container)
 
     def to_sandbox_result(self, result: AgenticResult) -> SandboxResult:
@@ -175,7 +221,13 @@ class AgenticSandbox:
 
     # -- Docker helpers ------------------------------------------------------
 
-    def _start_container(self, container: str, workspace: Path) -> None:
+    def _start_container(
+        self,
+        container: str,
+        workspace: Path,
+        *,
+        bridge_url: str | None = None,
+    ) -> None:
         """Start a long-lived Docker container with workspace mounted."""
         cmd = [
             "docker", "run", "-d",
@@ -196,6 +248,12 @@ class AgenticSandbox:
         # GPU passthrough
         if self.config.gpu_enabled:
             cmd.extend(["--gpus", "all"])
+
+        # Phase 2 ②-b: host-bridge URL for the in-container Biomni client.
+        if bridge_url:
+            cmd.extend(["-e", f"BIOMNI_BRIDGE_URL={bridge_url}"])
+            # Linux Docker needs this to resolve ``host.docker.internal``.
+            cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
 
         cmd.extend([self.config.image, "tail", "-f", "/dev/null"])
 
