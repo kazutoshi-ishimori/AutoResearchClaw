@@ -18,9 +18,16 @@ import urllib.parse
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 from researchclaw.config import AgenticConfig
 from researchclaw.experiment.sandbox import SandboxResult, parse_metrics
+from researchclaw.experiment.verify.agent_prompt import (
+    augment_prompt_with_biomni_guidance,
+)
+
+
+_IN_CONTAINER_BIOMNI_CLIENT = "/usr/local/bin/biomni_client.py"
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +84,8 @@ class AgenticSandbox:
         workdir: Path,
         skills_dir: Path | None = None,
         bridge_lifecycle: AbstractContextManager[str] | None = None,
+        biomni_tools: Sequence[str] = (),
+        biomni_client_path: Path | None = None,
     ) -> None:
         self.config = config
         self.workdir = workdir.resolve()
@@ -86,6 +95,11 @@ class AgenticSandbox:
         # the bridge is started before the container and torn down after,
         # and its URL is injected into the container via ``BIOMNI_BRIDGE_URL``.
         self._bridge_lifecycle = bridge_lifecycle
+        # Phase 2 ②-c: bind the allowlist + bundled client into the agent's
+        # workspace. Both are only honoured when ``bridge_lifecycle`` is set,
+        # so callers without a bridge see strict no-op behaviour.
+        self._biomni_tools: tuple[str, ...] = tuple(biomni_tools)
+        self._biomni_client_path = biomni_client_path
         self._container_name: str | None = None
 
     # -- public API ----------------------------------------------------------
@@ -141,8 +155,13 @@ class AgenticSandbox:
                     timeout=min(300, timeout),
                 )
 
-            # 3. Run the agent
-            agent_cmd = self._build_agent_command(prompt)
+            # 3. Run the agent (with Biomni guidance prepended when a bridge is live)
+            effective_prompt = (
+                augment_prompt_with_biomni_guidance(prompt, self._biomni_tools)
+                if bridge_url_for_container
+                else prompt
+            )
+            agent_cmd = self._build_agent_command(effective_prompt)
             proc = self._docker_exec(
                 container,
                 agent_cmd,
@@ -254,6 +273,16 @@ class AgenticSandbox:
             cmd.extend(["-e", f"BIOMNI_BRIDGE_URL={bridge_url}"])
             # Linux Docker needs this to resolve ``host.docker.internal``.
             cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
+            # Phase 2 ②-c: mount the bundled thin client read-only so the
+            # agent only needs to know one canonical path.
+            if self._biomni_client_path is not None:
+                cmd.extend(
+                    [
+                        "-v",
+                        f"{Path(self._biomni_client_path).resolve()}"
+                        f":{_IN_CONTAINER_BIOMNI_CLIENT}:ro",
+                    ]
+                )
 
         cmd.extend([self.config.image, "tail", "-f", "/dev/null"])
 

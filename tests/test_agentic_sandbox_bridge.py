@@ -50,7 +50,13 @@ def _stub_run(capture: list):
     return fake_run
 
 
-def _make_sandbox(tmp_path: Path, bridge=None) -> AgenticSandbox:
+def _make_sandbox(
+    tmp_path: Path,
+    bridge=None,
+    *,
+    biomni_tools: tuple[str, ...] = (),
+    biomni_client_path: Path | None = None,
+) -> AgenticSandbox:
     cfg = AgenticConfig(
         image="rc-agentic:test",
         agent_cli="claude",
@@ -65,6 +71,8 @@ def _make_sandbox(tmp_path: Path, bridge=None) -> AgenticSandbox:
         workdir=tmp_path / "wd",
         skills_dir=None,
         bridge_lifecycle=bridge,
+        biomni_tools=biomni_tools,
+        biomni_client_path=biomni_client_path,
     )
 
 
@@ -167,3 +175,80 @@ def test_bridge_passes_non_loopback_url_unchanged(tmp_path, monkeypatch) -> None
         if a == "-e" and i + 1 < len(docker_run_argv)
     ]
     assert "BIOMNI_BRIDGE_URL=http://10.0.0.4:8765" in env_flags
+
+
+# -- Phase 2 ②-c: in-container client mount + prompt guidance ---------------
+
+
+def test_biomni_client_path_is_mounted_read_only(tmp_path, monkeypatch) -> None:
+    """``biomni_client.py`` must reach the container at the published path."""
+    bridge = _FakeBridge()
+    calls: list = []
+    monkeypatch.setattr(subprocess, "run", _stub_run(calls))
+
+    client = tmp_path / "biomni_client.py"
+    client.write_text("# placeholder\n")
+    sb = _make_sandbox(tmp_path, bridge=bridge, biomni_client_path=client)
+    sb.run_agent_session("hi", workspace=tmp_path / "ws", timeout_sec=10)
+
+    docker_run_argv = [c[0] for c in calls if c[0][:2] == ["docker", "run"]][0]
+    mounts = [
+        docker_run_argv[i + 1]
+        for i, a in enumerate(docker_run_argv)
+        if a == "-v" and i + 1 < len(docker_run_argv)
+    ]
+    expected = f"{client.resolve()}:/usr/local/bin/biomni_client.py:ro"
+    assert expected in mounts, f"expected client mount in {mounts!r}"
+
+
+def test_biomni_tools_inject_guidance_into_agent_prompt(
+    tmp_path, monkeypatch
+) -> None:
+    """Allowlisted tools must appear in the prompt the agent actually sees."""
+    bridge = _FakeBridge()
+    calls: list = []
+    monkeypatch.setattr(subprocess, "run", _stub_run(calls))
+
+    sb = _make_sandbox(
+        tmp_path,
+        bridge=bridge,
+        biomni_tools=("database.query_uniprot", "database.query_kegg"),
+    )
+    sb.run_agent_session(
+        "Run the experiment.", workspace=tmp_path / "ws", timeout_sec=10
+    )
+
+    docker_exec_calls = [c[0] for c in calls if c[0][:2] == ["docker", "exec"]]
+    assert docker_exec_calls, "expected docker exec to be invoked"
+    # The agent CLI command is the last argv element (bash -c "<cmd>").
+    bash_cmd = docker_exec_calls[0][-1]
+    assert "biomni_client.py" in bash_cmd
+    assert "$BIOMNI_BRIDGE_URL" in bash_cmd
+    assert "database.query_uniprot" in bash_cmd
+    assert "database.query_kegg" in bash_cmd
+    # The original task must still be present after the guidance preface.
+    assert "Run the experiment." in bash_cmd
+
+
+def test_biomni_features_are_noop_without_bridge(tmp_path, monkeypatch) -> None:
+    """Without a bridge, neither the mount nor the guidance must appear."""
+    calls: list = []
+    monkeypatch.setattr(subprocess, "run", _stub_run(calls))
+
+    client = tmp_path / "biomni_client.py"
+    client.write_text("# placeholder\n")
+    sb = _make_sandbox(
+        tmp_path,
+        bridge=None,  # no lifecycle → biomni machinery must stay dormant
+        biomni_tools=("database.query_uniprot",),
+        biomni_client_path=client,
+    )
+    sb.run_agent_session("hi", workspace=tmp_path / "ws", timeout_sec=10)
+
+    docker_run_argv = [c[0] for c in calls if c[0][:2] == ["docker", "run"]][0]
+    assert not any("biomni_client.py" in a for a in docker_run_argv)
+
+    docker_exec_calls = [c[0] for c in calls if c[0][:2] == ["docker", "exec"]]
+    bash_cmd = docker_exec_calls[0][-1] if docker_exec_calls else ""
+    assert "biomni_client.py" not in bash_cmd
+    assert "database.query_uniprot" not in bash_cmd
