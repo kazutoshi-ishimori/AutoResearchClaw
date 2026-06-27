@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from researchclaw.config import BiomniConfig
 
 
 _ANNOUNCE_PREFIX = "biomni bridge listening on "
@@ -157,3 +162,75 @@ class BiomniBridgeProcess:
                 proc.wait(timeout=5)
         finally:
             self._proc = None
+
+
+# -- Phase 2 pipeline-wiring A: BiomniConfig → factory components -----------
+
+
+@dataclass
+class StaticBridgeUrl:
+    """Trivial context manager that just yields a pre-existing bridge URL.
+
+    Used when the operator runs the bridge daemon themselves and supplies
+    ``biomni.bridge_url`` directly; ARC has nothing to spawn or tear down,
+    but :class:`AgenticSandbox` still wants a context manager so it can
+    enter/exit one uniformly.
+    """
+
+    url: str
+
+    def __enter__(self) -> str:
+        return self.url
+
+    def __exit__(self, *exc_info) -> None:
+        return None
+
+
+def build_biomni_bridge_components(
+    biomni_cfg: "BiomniConfig",
+    *,
+    ledger_dir: Path,
+    repo_root: Path,
+    python_executable: str | None = None,
+) -> tuple[AbstractContextManager[str] | None, tuple[str, ...], Path | None]:
+    """Translate a :class:`BiomniConfig` into the triplet AgenticSandbox wants.
+
+    Returns ``(bridge_lifecycle, biomni_tools, biomni_client_path)``.
+
+    * Both ``server_cmd`` and ``bridge_url`` empty → strict no-op triplet.
+    * ``server_cmd`` set → spawn an in-house :class:`BiomniBridgeProcess`
+      and own the provenance ledger ourselves. Wins over ``bridge_url`` to
+      keep the ledger ownership invariant (the executor's observer must be
+      ours).
+    * Only ``bridge_url`` set → return a :class:`StaticBridgeUrl` so the
+      sandbox can ``with`` it uniformly.
+
+    ``ledger_dir`` roots a relative ``provenance_path``; absolute paths are
+    respected as-is.
+    """
+    server_cmd = (biomni_cfg.server_cmd or "").strip()
+    bridge_url = (biomni_cfg.bridge_url or "").strip()
+    if not server_cmd and not bridge_url:
+        return (None, (), None)
+
+    bridge_dir = repo_root / "external" / "biomni_bridge"
+    client_path = bridge_dir / "biomni_client.py"
+    tools = tuple(biomni_cfg.tool_allowlist)
+
+    lifecycle: AbstractContextManager[str]
+    if server_cmd:
+        provenance = Path(biomni_cfg.provenance_path or "provenance.jsonl")
+        if not provenance.is_absolute():
+            provenance = ledger_dir / provenance
+        cfg = BridgeProcessConfig(
+            daemon_script=bridge_dir / "biomni_bridge_daemon.py",
+            python_executable=python_executable or sys.executable,
+            ledger_path=provenance,
+            allowlist=tools,
+            server_cmd=server_cmd,
+        )
+        lifecycle = BiomniBridgeProcess(cfg)
+    else:
+        lifecycle = StaticBridgeUrl(bridge_url)
+
+    return (lifecycle, tools, client_path)

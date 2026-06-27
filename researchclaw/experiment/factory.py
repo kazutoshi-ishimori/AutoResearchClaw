@@ -10,6 +10,7 @@ from researchclaw.config import ExperimentConfig
 from researchclaw.experiment.sandbox import ExperimentSandbox, SandboxProtocol
 
 if TYPE_CHECKING:
+    from researchclaw.config import BiomniConfig
     from researchclaw.experiment.agentic_sandbox import AgenticSandbox
 
 logger = logging.getLogger(__name__)
@@ -112,10 +113,21 @@ def create_agentic_sandbox(
     config: ExperimentConfig,
     workdir: Path,
     skills_dir: Path | None = None,
+    *,
+    biomni_cfg: "BiomniConfig | None" = None,
+    repo_root: Path | None = None,
+    ledger_dir: Path | None = None,
 ) -> "AgenticSandbox":  # noqa: F821
     """Return an :class:`AgenticSandbox` for agentic experiment mode.
 
     Validates that Docker is available before returning.
+
+    When ``biomni_cfg`` is supplied (Phase 2 pipeline wiring A), the factory
+    consults :func:`build_biomni_bridge_components` to produce the
+    ``bridge_lifecycle`` / ``biomni_tools`` / ``biomni_client_path`` triplet
+    that the sandbox already knows how to honour. ``repo_root`` locates the
+    bundled ``external/biomni_bridge/`` directory; ``ledger_dir`` roots a
+    relative ``provenance_path``.
     """
     from researchclaw.experiment.agentic_sandbox import AgenticSandbox
 
@@ -129,4 +141,31 @@ def create_agentic_sandbox(
     if agentic_cfg.gpu_enabled:
         logger.info("Agentic sandbox: GPU passthrough enabled")
 
-    return AgenticSandbox(agentic_cfg, workdir, skills_dir=skills_dir)
+    bridge_lifecycle = None
+    biomni_tools: tuple[str, ...] = ()
+    biomni_client_path: Path | None = None
+    if biomni_cfg is not None:
+        if repo_root is None or ledger_dir is None:
+            raise RuntimeError(
+                "create_agentic_sandbox: biomni_cfg requires repo_root and "
+                "ledger_dir so the bridge can find external/biomni_bridge/ "
+                "and root the provenance ledger."
+            )
+        from researchclaw.experiment.verify.bridge_lifecycle import (
+            build_biomni_bridge_components,
+        )
+
+        bridge_lifecycle, biomni_tools, biomni_client_path = (
+            build_biomni_bridge_components(
+                biomni_cfg, ledger_dir=ledger_dir, repo_root=repo_root
+            )
+        )
+
+    return AgenticSandbox(
+        agentic_cfg,
+        workdir,
+        skills_dir=skills_dir,
+        bridge_lifecycle=bridge_lifecycle,
+        biomni_tools=biomni_tools,
+        biomni_client_path=biomni_client_path,
+    )
