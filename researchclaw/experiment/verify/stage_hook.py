@@ -18,6 +18,14 @@ from typing import Any
 
 from researchclaw.experiment.verify.claim_binding import ClaimBindingReport, bind_claims
 from researchclaw.experiment.verify.entity_gate import EntityGate, EntityReport
+from researchclaw.experiment.verify.oracle_registry import (
+    RecomputeContext,
+    build_covid_oracles,
+)
+from researchclaw.experiment.verify.recompute import (
+    RecomputeReport,
+    recompute_metrics,
+)
 
 _ENTITY_KINDS = ("gene", "drug", "pathway")
 
@@ -76,6 +84,58 @@ def run_biomni_gates(
             entity_report = gate.check(entities)
 
     return claim_report, entity_report
+
+
+def collect_recompute_context(summary: dict[str, Any]) -> RecomputeContext | None:
+    """Build a :class:`RecomputeContext` from the experiment summary.
+
+    Layer ④ needs (ranking, positives) to recompute the headline metric. Both
+    must be present in the summary — when either is missing or malformed we
+    return ``None`` so the recompute gate stays silent (layer ④ only fires on
+    contradiction, never on absence).
+    """
+    ranking_raw = summary.get("ranking")
+    positives_raw = summary.get("positives")
+    if not isinstance(ranking_raw, list) or not ranking_raw:
+        return None
+    if not isinstance(positives_raw, list) or not positives_raw:
+        return None
+    try:
+        ranking = tuple(
+            (str(item[0]), float(item[1])) for item in ranking_raw
+        )
+    except (TypeError, ValueError, IndexError):
+        return None
+    positives = frozenset(str(p) for p in positives_raw)
+    return RecomputeContext(ranking=ranking, positives=positives)
+
+
+def run_recompute_gate(
+    summary: dict[str, Any],
+    biomni_cfg: Any,
+) -> RecomputeReport | None:
+    """Run layer ④ over *summary* if the configured oracles and inputs align.
+
+    Returns ``None`` — no report at all — when any prerequisite is missing:
+
+    * ``recompute_headline_metrics`` is empty (layer ④ disabled by config);
+    * the summary has no ranking / positives to build a context from;
+    * none of the configured names are registered in the oracle registry.
+
+    Otherwise returns a :class:`RecomputeReport` that the runner folds into
+    the experiment diagnosis. Silence on absence keeps the gate consistent
+    with the other layers; mismatch on contradiction is loud.
+    """
+    metric_names = tuple(getattr(biomni_cfg, "recompute_headline_metrics", ()) or ())
+    if not metric_names:
+        return None
+    ctx = collect_recompute_context(summary)
+    if ctx is None:
+        return None
+    oracles = build_covid_oracles(metric_names, ctx)
+    if not oracles:
+        return None
+    return recompute_metrics(collect_claimed_metrics(summary), oracles)
 
 
 def _resolve_db(rel: str, base_dir: Path) -> Path | None:

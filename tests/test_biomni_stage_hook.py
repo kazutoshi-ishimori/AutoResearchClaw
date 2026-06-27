@@ -20,8 +20,10 @@ from researchclaw.experiment.verify.stage_hook import (
     build_entity_gate,
     collect_claimed_entities,
     collect_claimed_metrics,
+    collect_recompute_context,
     resolve_ledger_path,
     run_biomni_gates,
+    run_recompute_gate,
 )
 from researchclaw.pipeline.experiment_diagnosis import (
     DeficiencyType,
@@ -141,6 +143,79 @@ def test_resolve_ledger_absent_returns_none(tmp_path: Path) -> None:
 
 def test_build_entity_gate_none_when_unconfigured(tmp_path: Path) -> None:
     assert build_entity_gate(BiomniConfig(), tmp_path) is None
+
+
+# --- layer ④ recompute hook (Phase 2 pipeline-wiring E) --------------------
+
+
+def _summary_with_ranking() -> dict:
+    return {
+        "best_run": {"metrics": {"auroc_phase2plus": 1.0}},
+        "ranking": [["A", 0.9], ["B", 0.8], ["C", 0.4], ["D", 0.1]],
+        "positives": ["A", "B"],
+    }
+
+
+def test_collect_recompute_context_extracts_from_summary() -> None:
+    """Summary with ranking + positives → frozen RecomputeContext."""
+    ctx = collect_recompute_context(_summary_with_ranking())
+    assert ctx is not None
+    assert ctx.ranking == (("A", 0.9), ("B", 0.8), ("C", 0.4), ("D", 0.1))
+    assert ctx.positives == frozenset({"A", "B"})
+
+
+def test_collect_recompute_context_missing_ranking_returns_none() -> None:
+    """No ranking ⇒ None (silence is not failure)."""
+    assert collect_recompute_context({"positives": ["A"]}) is None
+
+
+def test_collect_recompute_context_missing_positives_returns_none() -> None:
+    assert collect_recompute_context({"ranking": [["A", 0.9]]}) is None
+
+
+def test_collect_recompute_context_malformed_entries_returns_none() -> None:
+    """A non-numeric score in the ranking must not raise — return None instead."""
+    bad = {"ranking": [["A", "not-a-number"]], "positives": ["A"]}
+    assert collect_recompute_context(bad) is None
+
+
+def test_run_recompute_gate_no_metric_names_is_noop() -> None:
+    """recompute_headline_metrics empty ⇒ None (layer ④ disabled by config)."""
+    cfg = BiomniConfig()  # default: recompute_headline_metrics=()
+    assert run_recompute_gate(_summary_with_ranking(), cfg) is None
+
+
+def test_run_recompute_gate_no_ranking_in_summary_is_noop() -> None:
+    """No ranking in summary ⇒ None even when names are configured."""
+    cfg = BiomniConfig(recompute_headline_metrics=("auroc_phase2plus",))
+    summary = {"best_run": {"metrics": {"auroc_phase2plus": 1.0}}}
+    assert run_recompute_gate(summary, cfg) is None
+
+
+def test_run_recompute_gate_perfect_agreement_is_ok() -> None:
+    """Configured name + ranking + matching claim ⇒ verified report."""
+    cfg = BiomniConfig(recompute_headline_metrics=("auroc_phase2plus",))
+    report = run_recompute_gate(_summary_with_ranking(), cfg)
+    assert report is not None
+    assert report.ok
+    assert ("auroc_phase2plus", 1.0, 1.0) in report.verified
+
+
+def test_run_recompute_gate_disagreement_is_mismatch() -> None:
+    """Claim of 0.5 with recomputed 1.0 ⇒ mismatch flagged."""
+    cfg = BiomniConfig(recompute_headline_metrics=("auroc_phase2plus",))
+    summary = _summary_with_ranking()
+    summary["best_run"]["metrics"]["auroc_phase2plus"] = 0.5
+    report = run_recompute_gate(summary, cfg)
+    assert report is not None
+    assert not report.ok
+    assert any(name == "auroc_phase2plus" for name, *_ in report.mismatched)
+
+
+def test_run_recompute_gate_unknown_name_is_silently_dropped() -> None:
+    """A configured name with no builder ⇒ no oracle ⇒ None (no gate ran)."""
+    cfg = BiomniConfig(recompute_headline_metrics=("never_registered",))
+    assert run_recompute_gate(_summary_with_ranking(), cfg) is None
 
 
 def test_build_entity_gate_loads_existing_db(tmp_path: Path) -> None:
