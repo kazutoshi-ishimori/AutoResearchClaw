@@ -378,6 +378,46 @@ def _execute_experiment_run(
             json.dumps(run_payload, indent=2), encoding="utf-8"
         )
 
+        # Fabrication-guard for agentic mode (parity with sandbox/docker).
+        # An agentic session that yields zero real numeric metrics — whether
+        # it crashed, finished suspiciously fast, or simply produced nothing —
+        # must NOT be marked DONE, or downstream stages will paper-write over
+        # phantom results.
+        _real_metric_count = sum(
+            1
+            for _v in (result.metrics or {}).values()
+            if isinstance(_v, (int, float))
+            and not math.isnan(_v)
+            and not math.isinf(_v)
+        )
+        if _real_metric_count == 0:
+            _elapsed = result.elapsed_sec or 0.0
+            if run_status == "failed":
+                _err = (
+                    f"Agentic experiment failed with zero real metrics "
+                    f"(elapsed={_elapsed:.1f}s). Pipeline must not proceed "
+                    f"to paper writing without verified data."
+                )
+            elif _elapsed < 30.0:
+                _err = (
+                    f"Agentic experiment 'completed' in {_elapsed:.1f}s with "
+                    f"zero real metrics — likely a misclassified crash."
+                )
+            else:
+                _err = (
+                    f"Agentic experiment produced zero real metrics "
+                    f"(elapsed={_elapsed:.1f}s, status={run_status}). "
+                    f"Pipeline must not proceed without verified results."
+                )
+            logger.error("Stage 12 (agentic): %s", _err)
+            return StageResult(
+                stage=Stage.EXPERIMENT_RUN,
+                status=StageStatus.FAILED,
+                artifacts=("runs/",),
+                evidence_refs=("stage-12/runs/",),
+                error=_err,
+            )
+
         return StageResult(
             stage=Stage.EXPERIMENT_RUN,
             status=StageStatus.DONE,

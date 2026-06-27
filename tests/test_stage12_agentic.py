@@ -199,6 +199,72 @@ def test_agentic_branch_passes_workspace_and_timeout(
     assert timeout == cfg.experiment.agentic.timeout_sec
 
 
+# -- Phase 2 pipeline-wiring C: fabrication-guard for the agentic branch ----
+
+
+def test_agentic_zero_metrics_fast_completion_returns_failed(
+    stage_dir: Path, run_dir: Path
+) -> None:
+    """returncode=0 + empty metrics + elapsed < 30s → FAILED (misclassified)."""
+    cfg = _make_agentic_config()
+    result = _make_agentic_result(
+        returncode=0, metrics={}, elapsed_sec=2.5, stdout="done"
+    )
+    sr, _f, _s = _invoke(stage_dir, run_dir, cfg, agentic_result=result)
+    assert sr.status == StageStatus.FAILED
+    assert "metric" in (sr.error or "").lower() or "fabricat" in (sr.error or "").lower()
+
+
+def test_agentic_failed_with_zero_metrics_returns_failed(
+    stage_dir: Path, run_dir: Path
+) -> None:
+    """A crashed agent with no metrics must NOT be marked DONE."""
+    cfg = _make_agentic_config()
+    result = _make_agentic_result(
+        returncode=-1, metrics={}, elapsed_sec=5.0, stderr="agent crashed"
+    )
+    sr, _f, _s = _invoke(stage_dir, run_dir, cfg, agentic_result=result)
+    assert sr.status == StageStatus.FAILED
+
+
+def test_agentic_long_elapsed_with_zero_metrics_returns_failed(
+    stage_dir: Path, run_dir: Path
+) -> None:
+    """Long runs without real metrics are still fabrication: FAILED."""
+    cfg = _make_agentic_config()
+    result = _make_agentic_result(
+        returncode=0, metrics={}, elapsed_sec=900.0, stdout="done"
+    )
+    sr, _f, _s = _invoke(stage_dir, run_dir, cfg, agentic_result=result)
+    assert sr.status == StageStatus.FAILED
+
+
+def test_agentic_with_real_metrics_passes_guard(
+    stage_dir: Path, run_dir: Path
+) -> None:
+    """Real numeric metrics with a normal completion must remain DONE."""
+    cfg = _make_agentic_config()
+    result = _make_agentic_result(
+        returncode=0, metrics={"auroc": 0.91}, elapsed_sec=42.0
+    )
+    sr, _f, _s = _invoke(stage_dir, run_dir, cfg, agentic_result=result)
+    assert sr.status == StageStatus.DONE
+
+
+def test_agentic_nan_only_metrics_fail_guard(
+    stage_dir: Path, run_dir: Path
+) -> None:
+    """A metric that is NaN/Inf only is not a real metric."""
+    import math
+
+    cfg = _make_agentic_config()
+    result = _make_agentic_result(
+        returncode=0, metrics={"auroc": math.nan}, elapsed_sec=60.0
+    )
+    sr, _f, _s = _invoke(stage_dir, run_dir, cfg, agentic_result=result)
+    assert sr.status == StageStatus.FAILED
+
+
 def test_non_agentic_modes_are_unaffected(stage_dir: Path, run_dir: Path) -> None:
     """Adding the agentic branch must not change ``mode='simulated'`` behaviour."""
     from researchclaw.pipeline.stage_impls._execution import (
