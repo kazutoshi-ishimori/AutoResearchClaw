@@ -300,6 +300,92 @@ def _execute_experiment_run(
         )
     # ── End ColliderAgent mode ──────────────────────────────────────────
 
+    # ── Agentic mode (Claude Code in Docker + optional Biomni bridge) ────
+    if mode == "agentic":
+        from researchclaw.experiment.factory import create_agentic_sandbox
+
+        # Prompt: prefer Stage 9 exp_plan.yaml, fall back to generated code,
+        # then a generic placeholder if neither is present.
+        prompt_text = _read_prior_artifact(run_dir, "exp_plan.yaml") or code_text or ""
+        if not prompt_text:
+            logger.warning(
+                "Stage 12 (agentic): no exp_plan.yaml or experiment code found — "
+                "using generic placeholder prompt"
+            )
+            prompt_text = (
+                "# Experiment Task\n\n"
+                "Run the experiment for the configured topic. "
+                "Write final metrics to results.json in your working directory.\n"
+            )
+
+        ag_cfg = config.experiment.agentic
+        workspace = runs_dir / "agentic_workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        sandbox = create_agentic_sandbox(
+            config.experiment,
+            workdir=workspace,
+            biomni_cfg=config.experiment.biomni,
+            repo_root=Path.cwd(),
+            ledger_dir=run_dir,
+        )
+
+        result = sandbox.run_agent_session(
+            prompt_text,
+            workspace=workspace,
+            timeout_sec=ag_cfg.timeout_sec,
+        )
+
+        # Read structured results.json if the agent wrote one.
+        structured_results: dict[str, Any] | None = None
+        results_json_path = workspace / "results.json"
+        if results_json_path.exists():
+            try:
+                structured_results = json.loads(
+                    results_json_path.read_text(encoding="utf-8")
+                )
+                (runs_dir / "results.json").write_text(
+                    results_json_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            except (json.JSONDecodeError, OSError):
+                structured_results = None
+
+        # Map AgenticResult onto the same run_status vocabulary the other
+        # branches use, so Stage 13+ can treat agentic runs uniformly.
+        if result.returncode == 0:
+            run_status = "completed"
+        elif result.metrics:
+            run_status = "partial"
+        else:
+            run_status = "failed"
+
+        run_payload: dict[str, Any] = {
+            "run_id": "run-1",
+            "task_id": "agentic-main",
+            "status": run_status,
+            "metrics": result.metrics,
+            "elapsed_sec": result.elapsed_sec,
+            "stdout": (result.stdout or "")[:4000],
+            "stderr": (result.stderr or "")[:2000],
+            "timed_out": False,
+            "completed_at": _utcnow_iso(),
+        }
+        if structured_results is not None:
+            run_payload["structured_results"] = structured_results
+
+        (runs_dir / "run-1.json").write_text(
+            json.dumps(run_payload, indent=2), encoding="utf-8"
+        )
+
+        return StageResult(
+            stage=Stage.EXPERIMENT_RUN,
+            status=StageStatus.DONE,
+            artifacts=("runs/",),
+            evidence_refs=("stage-12/runs/",),
+        )
+    # ── End Agentic mode ─────────────────────────────────────────────────
+
     if mode in ("sandbox", "docker"):
         # P7: Auto-install missing dependencies before subprocess sandbox
         if mode == "sandbox":
