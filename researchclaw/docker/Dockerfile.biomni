@@ -1,0 +1,18 @@
+# ResearchClaw Biomni-agentic sandbox — biology stack + Claude Code CLI.
+# Build: docker build -f Dockerfile.biomni -t researchclaw/sandbox-biomni:latest researchclaw/docker/
+# Layers: FROM sandbox-biology + node 22 + @anthropic-ai/claude-code so the
+# agentic_sandbox can launch `claude` inside the container while the
+# Biomni host-side bridge handles tool calls back to the Biomni venv.
+FROM researchclaw/sandbox-biology:latest
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+USER researcher
