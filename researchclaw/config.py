@@ -295,6 +295,7 @@ class AgenticConfig:
     mount_skills: bool = True
     allow_shell_commands: bool = True
     max_turns: int = 50
+    env_passthrough: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1217,6 +1218,10 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
 def _parse_agentic_config(data: dict[str, Any]) -> AgenticConfig:
     if not data:
         return AgenticConfig()
+    env_raw = data.get("env_passthrough", ())
+    if isinstance(env_raw, str):
+        env_raw = [env_raw]
+    env_passthrough = tuple(str(x) for x in env_raw)
     return AgenticConfig(
         image=data.get("image", "researchclaw/experiment:latest"),
         agent_cli=data.get("agent_cli", "claude"),
@@ -1230,6 +1235,7 @@ def _parse_agentic_config(data: dict[str, Any]) -> AgenticConfig:
         mount_skills=bool(data.get("mount_skills", True)),
         allow_shell_commands=bool(data.get("allow_shell_commands", True)),
         max_turns=int(data.get("max_turns", 50)),
+        env_passthrough=env_passthrough,
     )
 
 

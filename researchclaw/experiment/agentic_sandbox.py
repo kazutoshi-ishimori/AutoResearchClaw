@@ -268,6 +268,13 @@ class AgenticSandbox:
         if self.config.gpu_enabled:
             cmd.extend(["--gpus", "all"])
 
+        # Phase 2 wiring G: passthrough configured env vars (e.g. ANTHROPIC_API_KEY)
+        # so the agent CLI can authenticate. Unset names are skipped silently.
+        for name in self.config.env_passthrough:
+            val = os.environ.get(name)
+            if val is not None:
+                cmd.extend(["-e", f"{name}={val}"])
+
         # Phase 2 ②-b: host-bridge URL for the in-container Biomni client.
         if bridge_url:
             cmd.extend(["-e", f"BIOMNI_BRIDGE_URL={bridge_url}"])
