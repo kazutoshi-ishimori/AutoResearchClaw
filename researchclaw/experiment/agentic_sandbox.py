@@ -291,7 +291,10 @@ class AgenticSandbox:
                     ]
                 )
 
-        cmd.extend([self.config.image, "tail", "-f", "/dev/null"])
+        # Phase 2 wiring H: bypass the image's ENTRYPOINT (e.g. the domain
+        # entrypoint.sh that tries to ``python3 /workspace/$1``) so the
+        # keep-alive command runs verbatim.
+        cmd.extend(["--entrypoint", "tail", self.config.image, "-f", "/dev/null"])
 
         logger.info("Starting agentic container: %s", container)
         subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
