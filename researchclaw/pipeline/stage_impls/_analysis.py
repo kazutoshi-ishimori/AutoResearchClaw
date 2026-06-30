@@ -31,6 +31,30 @@ from researchclaw.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 
+def _recompute_contract_fields(structured_results: Any) -> dict[str, Any]:
+    """Promote the layer-④ recompute contract from the canonical results.json.
+
+    ``stage_hook.collect_recompute_context`` reads ``ranking`` + ``positives``
+    from the *top level* of ``experiment_summary.json``; the agent writes them
+    inside its results.json, which lands here as ``structured_results``. This
+    is a pure, generic passthrough — only well-formed, non-empty list fields
+    are surfaced, and each is surfaced independently. Anything else yields an
+    empty dict so the recompute gate stays silent on absence (parity with the
+    rest of the verification stack). No domain specifics are baked in: any
+    experiment whose results.json carries these fields gets layer ④ for free.
+    """
+    if not isinstance(structured_results, dict):
+        return {}
+    out: dict[str, Any] = {}
+    ranking = structured_results.get("ranking")
+    if isinstance(ranking, list) and ranking:
+        out["ranking"] = ranking
+    positives = structured_results.get("positives")
+    if isinstance(positives, list) and positives:
+        out["positives"] = positives
+    return out
+
+
 def _execute_result_analysis(
     stage_dir: Path,
     run_dir: Path,
@@ -549,6 +573,11 @@ def _execute_result_analysis(
         summary_payload["total_conditions"] = _total_conditions
     if _total_metrics:
         summary_payload["total_metric_keys"] = _total_metrics
+    # layer ④ recompute contract: surface ranking/positives from results.json
+    # to the top level so stage_hook.collect_recompute_context can read them.
+    summary_payload.update(
+        _recompute_contract_fields(exp_data.get("structured_results"))
+    )
     (stage_dir / "experiment_summary.json").write_text(
         json.dumps(summary_payload, indent=2, default=str), encoding="utf-8"
     )
