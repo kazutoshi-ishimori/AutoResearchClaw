@@ -91,6 +91,57 @@ def test_registry_plugs_into_recompute_metrics() -> None:
     assert ("auroc_phase2plus", 1.0, 1.0) in report.verified
 
 
+def test_mean_rank_known_metric_is_wired_as_closure() -> None:
+    """``mean_rank_of_positives`` must resolve to a zero-arg float closure."""
+    ctx = _toy_context()
+    oracles = build_covid_oracles(("mean_rank_of_positives",), ctx)
+    assert "mean_rank_of_positives" in oracles
+    assert callable(oracles["mean_rank_of_positives"])
+    assert isinstance(oracles["mean_rank_of_positives"](), float)
+
+
+def test_mean_rank_positives_at_top_is_near_one() -> None:
+    """Positives A (0.9) and B (0.8) hold descending ranks 1 and 2 ⇒ mean 1.5."""
+    ctx = _toy_context()
+    oracle = build_covid_oracles(("mean_rank_of_positives",), ctx)[
+        "mean_rank_of_positives"
+    ]
+    assert math.isclose(oracle(), 1.5)
+
+
+def test_mean_rank_uses_midrank_for_ties() -> None:
+    """A three-way tie at the top gives the tied positive the midrank (2.0)."""
+    ctx = RecomputeContext(
+        ranking=(("A", 0.5), ("B", 0.5), ("C", 0.5), ("D", 0.1)),
+        positives=frozenset({"A"}),
+    )
+    oracle = build_covid_oracles(("mean_rank_of_positives",), ctx)[
+        "mean_rank_of_positives"
+    ]
+    # ranks of the three tied 0.5s average to (1+2+3)/3 = 2.0; D is rank 4.
+    assert math.isclose(oracle(), 2.0)
+
+
+def test_mean_rank_is_order_independent() -> None:
+    """Midrank depends on the score multiset, not the emitted ranking order."""
+    shuffled = RecomputeContext(
+        ranking=(("D", 0.3), ("A", 0.9), ("E", 0.1), ("C", 0.4), ("B", 0.8)),
+        positives=frozenset({"A", "B"}),
+    )
+    oracle = build_covid_oracles(("mean_rank_of_positives",), shuffled)[
+        "mean_rank_of_positives"
+    ]
+    assert math.isclose(oracle(), 1.5)
+
+
+def test_mean_rank_no_positives_yields_nan() -> None:
+    ctx = RecomputeContext(ranking=(("A", 0.1), ("B", 0.2)), positives=frozenset())
+    oracle = build_covid_oracles(("mean_rank_of_positives",), ctx)[
+        "mean_rank_of_positives"
+    ]
+    assert math.isnan(oracle())
+
+
 def test_registry_with_no_positives_yields_nan_and_is_skipped() -> None:
     """No positives ⇒ AUROC undefined; recompute reports mismatch vs nan -> skipped/verified rule.
 

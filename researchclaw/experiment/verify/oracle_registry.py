@@ -68,8 +68,47 @@ def _build_auroc_phase2plus(ctx: RecomputeContext) -> Callable[[], float]:
     return lambda: _auroc(ctx.ranking, ctx.positives)
 
 
+def _mean_rank_of_positives(
+    ranking: tuple[tuple[str, float], ...], positives: frozenset[str]
+) -> float:
+    """Mean 1-based descending rank of the positives (1 = best), midrank ties.
+
+    Mirrors ``methods_v2.eval.metrics.mean_rank_of_positives`` — ``rankdata`` on
+    ``-scores`` with average-tie handling — but in pure python over the
+    (ranking, positives) context. Because midrank is a function of the score
+    *multiset* (not any emitted ordering), this is safe to recompute from the
+    contract regardless of how ties were broken when the ranking was serialised.
+    Returns NaN when there are no scoreable positives (rank undefined).
+    """
+    scores = [s for _, s in ranking]
+    pos_scores = [s for drug_id, s in ranking if drug_id in positives]
+    if not pos_scores:
+        return float("nan")
+    total = 0.0
+    for s in pos_scores:
+        n_greater = sum(1 for other in scores if other > s)
+        n_equal = sum(1 for other in scores if other == s)
+        total += n_greater + (n_equal + 1) / 2.0  # midrank of this score
+    return total / len(pos_scores)
+
+
+def _build_mean_rank_of_positives(ctx: RecomputeContext) -> Callable[[], float]:
+    return lambda: _mean_rank_of_positives(ctx.ranking, ctx.positives)
+
+
+# Only metrics that are (a) a deterministic function of (ranking, positives) and
+# (b) independent of how ties were broken when the ranking was serialised belong
+# here — layer ④ fires on contradiction, so a tie-break- or RNG-sensitive oracle
+# would raise false MISMATCHes. Deliberately EXCLUDED for that reason:
+#   * precision/recall/hit/enrichment @k — the top-k boundary is tie-break
+#     dependent, so an oracle that re-ranks the contract can disagree with the
+#     experiment's own index-tie-broken top-k at ties.
+#   * perm_pvalue, auroc_ci_* — RNG-driven (label shuffles / bootstrap resamples)
+#     and not reproducible across processes without the exact random stream.
+#   * class_recall_at_k — needs per-drug class labels, which the context omits.
 _BUILDERS: dict[str, Callable[[RecomputeContext], Callable[[], float]]] = {
     "auroc_phase2plus": _build_auroc_phase2plus,
+    "mean_rank_of_positives": _build_mean_rank_of_positives,
 }
 
 
