@@ -29,6 +29,12 @@ from researchclaw.experiment.verify.agent_prompt import (
 
 _IN_CONTAINER_BIOMNI_CLIENT = "/usr/local/bin/biomni_client.py"
 
+# ``docker run -d`` returns as soon as the container is created + started; on a
+# healthy engine that is sub-second (seconds at most for a cold local image).
+# A container-start-wedged Docker engine (e.g. a half-initialised WSL2 backend)
+# can block the call indefinitely, so bound it and fail loud instead of hanging.
+_CONTAINER_START_TIMEOUT_SEC = 180
+
 logger = logging.getLogger(__name__)
 
 
@@ -297,7 +303,23 @@ class AgenticSandbox:
         cmd.extend(["--entrypoint", "tail", self.config.image, "-f", "/dev/null"])
 
         logger.info("Starting agentic container: %s", container)
-        subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_CONTAINER_START_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"docker run for container {container!r} did not return within "
+                f"{_CONTAINER_START_TIMEOUT_SEC}s — the Docker engine appears "
+                "unresponsive (container start wedged). Aborting rather than "
+                "hanging; restart the Docker engine and retry."
+            ) from exc
 
     def _docker_exec(
         self,
