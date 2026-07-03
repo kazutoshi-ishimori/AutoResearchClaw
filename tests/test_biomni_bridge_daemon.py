@@ -146,6 +146,65 @@ def test_process_builds_argv_with_module_tool_args_ledger(tmp_path: Path) -> Non
 
 
 # -----------------------------------------------------------------------------
+# Bug A: qualified `module.tool` names must normalize to the bare allowlist key
+# -----------------------------------------------------------------------------
+
+def test_process_qualified_tool_name_is_accepted(tmp_path: Path) -> None:
+    """The config allowlist and agent prompt both use the qualified
+    ``database.query_uniprot`` form, but ``tool_modules`` is keyed by the bare
+    ``query_uniprot``. The daemon must normalize the qualified request to the
+    bare key so an honest agent call is not rejected with a spurious 403."""
+    d = _load_daemon()
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps({"length": 805})
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return _Proc()
+
+    cfg = d.BridgeConfig(
+        server_cmd="PY runner.py",
+        tool_modules={"query_uniprot": "database"},
+        ledger_path=tmp_path / "p.jsonl",
+        run=fake_run,
+    )
+    code, body = d.process_tool_request(
+        {"tool": "database.query_uniprot", "args": {"id": "Q9BYF1"}}, cfg
+    )
+    assert code == 200
+    assert body == {"result": {"length": 805}}
+    # The runner must receive the *bare* tool name and the mapped module,
+    # never the qualified string (which biomni_tool_runner cannot resolve).
+    argv = captured["argv"]
+    i = argv.index("--tool")
+    assert argv[i + 1] == "query_uniprot"
+    i = argv.index("--module")
+    assert argv[i + 1] == "database"
+
+
+def test_process_qualified_tool_wrong_module_returns_403(tmp_path: Path) -> None:
+    """A qualified name whose module does not match the allowlist mapping must
+    be rejected — the prefix is honest metadata, not a bypass. We refuse rather
+    than silently run a different module than the caller named."""
+    d = _load_daemon()
+    cfg = d.BridgeConfig(
+        server_cmd="PY runner.py",
+        tool_modules={"query_uniprot": "database"},
+        ledger_path=tmp_path / "p.jsonl",
+        run=_runner_ok({}),
+    )
+    code, body = d.process_tool_request(
+        {"tool": "chemistry.query_uniprot"}, cfg
+    )
+    assert code == 403
+    assert "allowlist" in body["error"].lower()
+
+
+# -----------------------------------------------------------------------------
 # Integration: real HTTP server on ephemeral port
 # -----------------------------------------------------------------------------
 

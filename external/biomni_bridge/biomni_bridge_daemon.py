@@ -61,6 +61,25 @@ class BridgeConfig:
     run: Callable[..., Any] = field(default=subprocess.run)
 
 
+def _resolve_allowed_tool(tool: str, tool_modules: dict[str, str]) -> str | None:
+    """Normalize a requested tool name to its bare allowlist key, or ``None``.
+
+    ``tool_modules`` is keyed by the *bare* name (``query_uniprot``), but the
+    config allowlist and agent prompts use the qualified ``module.tool`` form
+    (``database.query_uniprot``). Accept either: a bare name that is allowed, or
+    a qualified name whose module matches the mapping. A qualified name with a
+    mismatched module is refused rather than silently run under a different
+    module than the caller named.
+    """
+    if tool in tool_modules:
+        return tool
+    if "." in tool:
+        module, _, bare = tool.partition(".")
+        if bare in tool_modules and tool_modules[bare] == module:
+            return bare
+    return None
+
+
 def process_tool_request(payload: Any, cfg: BridgeConfig) -> tuple[int, dict]:
     """Pure-function ``POST /tool`` handler.
 
@@ -69,12 +88,13 @@ def process_tool_request(payload: Any, cfg: BridgeConfig) -> tuple[int, dict]:
     """
     if not isinstance(payload, dict) or "tool" not in payload:
         return 400, {"error": "body must be a JSON object with a 'tool' key"}
-    tool = payload["tool"]
+    requested = payload["tool"]
     args = payload.get("args", {})
     if not isinstance(args, dict):
         return 400, {"error": "'args' must be a JSON object"}
-    if tool not in cfg.tool_modules:
-        return 403, {"error": f"tool '{tool}' not in allowlist"}
+    tool = _resolve_allowed_tool(requested, cfg.tool_modules)
+    if tool is None:
+        return 403, {"error": f"tool '{requested}' not in allowlist"}
 
     module = cfg.tool_modules[tool]
     argv = shlex.split(cfg.server_cmd) + [
