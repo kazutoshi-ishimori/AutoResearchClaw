@@ -66,16 +66,26 @@ def run_biomni_gates(
     *,
     ledger_path: Path | None = None,
     gate: EntityGate | None = None,
+    verified_metrics: frozenset[str] = frozenset(),
 ) -> tuple[ClaimBindingReport | None, EntityReport | None]:
     """Run layer ⑤ (claim binding) and layer ② (entity gate) over *summary*.
 
     Each report is ``None`` when its inputs are unavailable — no ledger file,
     no configured gate, or no claimed entities — so the caller injects a
     deficiency only when a gate actually ran.
+
+    ``verified_metrics`` carries the names layer ④ has already reproduced from
+    the (ranking, positives) contract; those are threaded into ⑤ so a
+    legitimately-derived headline metric (not present as a raw tool return) is
+    treated as backed instead of flagged fabricated. See :func:`bind_claims`.
     """
     claim_report: ClaimBindingReport | None = None
     if ledger_path is not None and Path(ledger_path).exists():
-        claim_report = bind_claims(collect_claimed_metrics(summary), Path(ledger_path))
+        claim_report = bind_claims(
+            collect_claimed_metrics(summary),
+            Path(ledger_path),
+            verified_metrics=verified_metrics,
+        )
 
     entity_report: EntityReport | None = None
     if gate is not None:

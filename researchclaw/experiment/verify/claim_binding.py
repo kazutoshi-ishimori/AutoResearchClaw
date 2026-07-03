@@ -68,15 +68,28 @@ def bind_claims(
     ledger_path: Path,
     *,
     tol: float = 1e-9,
+    verified_metrics: frozenset[str] = frozenset(),
 ) -> ClaimBindingReport:
-    """Check that every numeric metric traces to a recorded tool return."""
+    """Check that every numeric metric traces to a recorded tool return.
+
+    ``verified_metrics`` names metrics an independent layer-④ oracle has already
+    reproduced from the experiment's own (ranking, positives) contract. Such a
+    metric is *derived* (e.g. AUROC) and so never appears verbatim as a raw tool
+    return, yet it is not fabricated: the trusted recomputation is its
+    provenance. These are treated as backed regardless of the ledger, resolving
+    the derived-metric limitation this module's header documents. Names not in
+    this set fall back to the strict ledger-value check, so a headline number
+    that neither a tool produced nor an oracle reproduced is still flagged.
+    """
     ledger = _ledger_numbers(ledger_path)
     report = ClaimBindingReport()
     for key, value in metrics.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue  # only quantitative scientific claims are bound
         fval = float(value)
-        if any(math.isclose(fval, lv, rel_tol=tol, abs_tol=tol) for lv in ledger):
+        if key in verified_metrics or any(
+            math.isclose(fval, lv, rel_tol=tol, abs_tol=tol) for lv in ledger
+        ):
             report.backed.append((key, fval))
         else:
             report.unbacked.append((key, fval))

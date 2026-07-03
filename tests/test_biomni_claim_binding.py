@@ -61,3 +61,47 @@ def test_numbers_nested_in_lists_are_collected(tmp_path: Path) -> None:
     )
     report = bind_claims({"max_degree": 7}, ledger)
     assert report.ok
+
+
+# -----------------------------------------------------------------------------
+# ④↔⑤ reconciliation: a derived metric independently reproduced by a layer-④
+# oracle has provenance (the trusted recomputation), so it must NOT be flagged
+# as fabricated even though its value never appears as a raw tool return.
+# -----------------------------------------------------------------------------
+
+def test_recompute_verified_metric_is_backed_without_ledger_value(tmp_path: Path) -> None:
+    """A headline AUROC is *derived* from the ranking, not returned by any tool,
+    so it never appears in the ledger. When layer ④ has independently verified
+    it, ⑤ must treat it as backed — otherwise a legitimately-derived metric is
+    wrongly flagged FABRICATED_METRIC (the Phase-0 limitation claim_binding.py
+    documents)."""
+    ledger = tmp_path / "provenance.jsonl"
+    _write_ledger(
+        ledger,
+        [{"tool": "query_uniprot", "raw_return": {"length": 1273}}],
+    )
+    report = bind_claims(
+        {"auroc_phase2plus": 0.40444444444444444},
+        ledger,
+        verified_metrics=frozenset({"auroc_phase2plus"}),
+    )
+    assert report.ok
+    assert report.unbacked == []
+    assert ("auroc_phase2plus", 0.40444444444444444) in report.backed
+
+
+def test_unverified_metric_still_flagged_despite_reconciliation(tmp_path: Path) -> None:
+    """Reconciliation must not become a blanket bypass: a metric with neither a
+    ledger value nor a layer-④ verification is still fabricated."""
+    ledger = tmp_path / "provenance.jsonl"
+    _write_ledger(
+        ledger,
+        [{"tool": "query_uniprot", "raw_return": {"length": 1273}}],
+    )
+    report = bind_claims(
+        {"auroc_phase2plus": 0.404, "made_up": 9.99},
+        ledger,
+        verified_metrics=frozenset({"auroc_phase2plus"}),
+    )
+    assert not report.ok
+    assert report.unbacked == [("made_up", 9.99)]

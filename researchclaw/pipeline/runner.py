@@ -314,8 +314,23 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
             # both supply what the oracle registry needs, so this is safe to
             # call unconditionally.
             _recompute = run_recompute_gate(summary, _biomni_cfg)
+            # A metric layer ④ independently reproduced from the (ranking,
+            # positives) contract is derived, not raw — it never appears in the
+            # ledger. Thread those names into ⑤ so claim-binding treats them as
+            # backed (the recomputation is their provenance) rather than
+            # flagging a legitimately-derived headline as FABRICATED_METRIC.
+            _verified_names = (
+                frozenset(name for name, _c, _r in _recompute.verified)
+                if _recompute is not None
+                else frozenset()
+            )
             if _ledger is not None or _gate is not None or _recompute is not None:
-                _cb, _er = run_biomni_gates(summary, ledger_path=_ledger, gate=_gate)
+                _cb, _er = run_biomni_gates(
+                    summary,
+                    ledger_path=_ledger,
+                    gate=_gate,
+                    verified_metrics=_verified_names,
+                )
                 add_biomni_verification_deficiencies(
                     diag,
                     claim_binding=_cb,

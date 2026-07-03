@@ -78,6 +78,27 @@ def test_gates_flag_fabricated_metric(tmp_path: Path) -> None:
     assert cb.unbacked == [("made_up", 123456.0)]
 
 
+def test_gates_exempt_recompute_verified_metric(tmp_path: Path) -> None:
+    """A derived headline metric verified by layer ④ is not in the ledger, but
+    must not be flagged by ⑤ — run_biomni_gates threads the verified names
+    through to bind_claims so the two gates agree."""
+    ledger = tmp_path / "provenance.jsonl"
+    _write_ledger(ledger, [{"length": 1273}])
+    summary = {"best_run": {"metrics": {"auroc_phase2plus": 0.40444444444444444}}}
+
+    cb, er = run_biomni_gates(
+        summary,
+        ledger_path=ledger,
+        gate=None,
+        verified_metrics=frozenset({"auroc_phase2plus"}),
+    )
+
+    assert cb is not None
+    assert cb.ok
+    assert cb.unbacked == []
+    assert ("auroc_phase2plus", 0.40444444444444444) in cb.backed
+
+
 def test_gates_flag_unknown_drug(tmp_path: Path) -> None:
     known = hashlib.sha256(b"DBGOOD").hexdigest()
     gate = EntityGate(drug_hashes={known})
