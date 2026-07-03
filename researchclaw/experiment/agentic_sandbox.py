@@ -66,6 +66,22 @@ def _next_container_name() -> str:
         return f"rc-agentic-{_CONTAINER_COUNTER}-{os.getpid()}"
 
 
+def _ensure_workspace_writable(workspace: Path) -> None:
+    """Create *workspace* and make it writable by the in-container agent user.
+
+    The container runs as a non-root user (UID 999) baked into the image, but a
+    dir the pipeline creates as the host user (UID 1000, mode 0o755) is not
+    writable to UID 999 once bind-mounted at ``/workspace``. The agent then
+    silently writes results.json to ``$HOME`` and the pipeline collects nothing
+    ("zero real metrics"). Opening the mount to world-writable is UID-agnostic
+    and safe here: this is a throwaway, git-ignored scratch dir under
+    ``artifacts/``. ``chmod`` after ``mkdir`` so an already-restrictive existing
+    dir is opened too.
+    """
+    workspace.mkdir(parents=True, exist_ok=True)
+    os.chmod(workspace, 0o777)
+
+
 @dataclass
 class AgenticResult:
     """Result of an agentic experiment session."""
@@ -130,7 +146,7 @@ class AgenticSandbox:
         self._container_name = container
 
         workspace = workspace.resolve()
-        workspace.mkdir(parents=True, exist_ok=True)
+        _ensure_workspace_writable(workspace)
 
         start = time.monotonic()
         bridge = self._bridge_lifecycle
