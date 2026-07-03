@@ -55,6 +55,33 @@ def _recompute_contract_fields(structured_results: Any) -> dict[str, Any]:
     return out
 
 
+def _entity_contract_fields(structured_results: Any) -> dict[str, Any]:
+    """Promote the layer-② entity contract from the canonical results.json.
+
+    ``stage_hook.collect_claimed_entities`` reads ``entities['drug']`` from the
+    top level of the summary. The drugs an experiment claims to have scored ARE
+    the ``drug_id``\\ s in its ``ranking``, so surface them as ``entities['drug']``
+    — giving the entity gate (layer ②) the same free-with-a-ranking treatment
+    the recompute oracle (layer ④) already gets. Pure and generic: malformed
+    ranking items are skipped and an absent/empty ranking yields ``{}`` so the
+    gate stays silent on absence, in parity with the rest of the stack.
+    """
+    if not isinstance(structured_results, dict):
+        return {}
+    ranking = structured_results.get("ranking")
+    if not isinstance(ranking, list) or not ranking:
+        return {}
+    drugs: list[str] = []
+    for item in ranking:
+        try:
+            drugs.append(str(item[0]))
+        except (TypeError, IndexError, KeyError):
+            continue
+    if not drugs:
+        return {}
+    return {"entities": {"drug": drugs}}
+
+
 def _execute_result_analysis(
     stage_dir: Path,
     run_dir: Path,
@@ -577,6 +604,11 @@ def _execute_result_analysis(
     # to the top level so stage_hook.collect_recompute_context can read them.
     summary_payload.update(
         _recompute_contract_fields(exp_data.get("structured_results"))
+    )
+    # layer ② entity contract: surface the ranked drug_ids as entities['drug']
+    # so the entity gate checks every scored candidate against the reference DB.
+    summary_payload.update(
+        _entity_contract_fields(exp_data.get("structured_results"))
     )
     (stage_dir / "experiment_summary.json").write_text(
         json.dumps(summary_payload, indent=2, default=str), encoding="utf-8"

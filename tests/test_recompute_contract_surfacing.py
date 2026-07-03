@@ -74,3 +74,51 @@ def test_round_trips_into_collect_recompute_context() -> None:
     assert ctx is not None
     assert ctx.ranking == (("A", 0.9), ("B", 0.8), ("C", 0.4))
     assert ctx.positives == frozenset({"A", "B"})
+
+
+# -----------------------------------------------------------------------------
+# Layer-② entity contract: the drugs an experiment claims to have scored ARE the
+# drug_ids in its ranking, so surface them as entities['drug'] — giving the
+# entity gate the same free-with-a-ranking treatment layer ④ gets.
+# -----------------------------------------------------------------------------
+
+def test_surfaces_drug_entities_from_ranking() -> None:
+    from researchclaw.pipeline.stage_impls._analysis import _entity_contract_fields
+
+    structured = {
+        "ranking": [["DB001", 0.91], ["DB002", 0.80], ["DB003", 0.12]],
+        "positives": ["DB001"],
+    }
+    assert _entity_contract_fields(structured) == {
+        "entities": {"drug": ["DB001", "DB002", "DB003"]}
+    }
+
+
+def test_entity_contract_empty_or_missing_ranking_yields_empty() -> None:
+    from researchclaw.pipeline.stage_impls._analysis import _entity_contract_fields
+
+    assert _entity_contract_fields({"positives": ["DB001"]}) == {}
+    assert _entity_contract_fields({"ranking": []}) == {}
+    assert _entity_contract_fields(None) == {}
+    assert _entity_contract_fields("nope") == {}
+
+
+def test_entity_contract_skips_malformed_ranking_items() -> None:
+    from researchclaw.pipeline.stage_impls._analysis import _entity_contract_fields
+
+    structured = {"ranking": [["DB001", 0.9], [], ["DB003", 0.1], 42]}
+    assert _entity_contract_fields(structured) == {
+        "entities": {"drug": ["DB001", "DB003"]}
+    }
+
+
+def test_entity_contract_round_trips_into_collect_claimed_entities() -> None:
+    from researchclaw.experiment.verify.stage_hook import collect_claimed_entities
+    from researchclaw.pipeline.stage_impls._analysis import _entity_contract_fields
+
+    structured = {"ranking": [["DB001", 0.9], ["DB002", 0.8]], "positives": ["DB001"]}
+    summary = {"best_run": {"metrics": {}}}
+    summary.update(_entity_contract_fields(structured))
+
+    entities = collect_claimed_entities(summary)
+    assert entities == {"drug": ["DB001", "DB002"]}
