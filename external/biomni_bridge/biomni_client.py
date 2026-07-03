@@ -14,8 +14,14 @@ Usage (from inside the agentic container)::
 
     python biomni_client.py \\
         --bridge-url http://host.docker.internal:8765 \\
-        --tool query_uniprot \\
-        --args-json '{"id": "Q9BYF1"}'
+        --tool database.query_uniprot \\
+        --args-json '{"endpoint": "https://rest.uniprot.org/uniprotkb/Q9BYF1.json?fields=accession,id,sequence"}'
+
+Use the deterministic direct-``endpoint`` form, not the natural-language
+``prompt`` form: ``prompt`` routes through an in-tool LLM (needs a langchain
+backend in the Biomni venv and is non-deterministic), which breaks the
+deterministic-replay gate (layer ③). The qualified ``module.tool`` name and the
+bare ``tool`` name are both accepted by the bridge.
 """
 
 from __future__ import annotations
