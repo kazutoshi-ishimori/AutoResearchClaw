@@ -61,6 +61,19 @@ class BridgeConfig:
     run: Callable[..., Any] = field(default=subprocess.run)
 
 
+def _would_use_llm_path(args: dict) -> bool:
+    """True if these args route a Biomni query tool through its in-tool LLM.
+
+    The database query tools (``query_uniprot`` / ``query_kegg`` / ``query_stringdb``)
+    accept either a natural-language ``prompt`` — parsed by an in-tool LLM, hence
+    non-deterministic — or a direct ``endpoint`` URL, which is deterministic and
+    replayable. A truthy ``prompt`` with no ``endpoint`` takes the LLM path; the
+    ``endpoint`` (when present) always wins, and ``prompt=None`` is fine (some
+    tools require ``prompt`` as a positional arg even when using ``endpoint``).
+    """
+    return bool(args.get("prompt")) and not args.get("endpoint")
+
+
 def _resolve_allowed_tool(tool: str, tool_modules: dict[str, str]) -> str | None:
     """Normalize a requested tool name to its bare allowlist key, or ``None``.
 
@@ -95,6 +108,14 @@ def process_tool_request(payload: Any, cfg: BridgeConfig) -> tuple[int, dict]:
     tool = _resolve_allowed_tool(requested, cfg.tool_modules)
     if tool is None:
         return 403, {"error": f"tool '{requested}' not in allowlist"}
+    if _would_use_llm_path(args):
+        return 400, {
+            "error": (
+                f"tool '{requested}' called with a non-deterministic 'prompt' and "
+                "no 'endpoint'; the deterministic-replay gate (layer ③) requires "
+                "the direct 'endpoint' form — pass endpoint=<URL> instead"
+            )
+        }
 
     module = cfg.tool_modules[tool]
     argv = shlex.split(cfg.server_cmd) + [

@@ -20,8 +20,20 @@ Usage (from inside the agentic container)::
 Use the deterministic direct-``endpoint`` form, not the natural-language
 ``prompt`` form: ``prompt`` routes through an in-tool LLM (needs a langchain
 backend in the Biomni venv and is non-deterministic), which breaks the
-deterministic-replay gate (layer ③). The qualified ``module.tool`` name and the
-bare ``tool`` name are both accepted by the bridge.
+deterministic-replay gate (layer ③). The bridge **enforces** this — a truthy
+``prompt`` with no ``endpoint`` is refused with HTTP 400. The qualified
+``module.tool`` name and the bare ``tool`` name are both accepted.
+
+Per-tool endpoint notes (all deterministic, layer-③ replayable):
+
+* ``database.query_uniprot`` — ``{"endpoint": ".../uniprotkb/P0DTC2.json?fields=accession,id,sequence"}``
+* ``database.query_stringdb`` — pin the STRING release for a stable payload::
+
+      {"prompt": null, "endpoint": "https://version-12-0.string-db.org/api/json/network?identifiers=ACE2&species=9606"}
+
+* ``database.query_kegg`` requires ``prompt`` positionally (pass ``null``) **and**
+  ``verbose=false`` for the compact deterministic ``{"raw_text": ...}`` form; its
+  default ``verbose=true`` returns an unstable structured payload — avoid it.
 """
 
 from __future__ import annotations

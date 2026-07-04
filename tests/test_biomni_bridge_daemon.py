@@ -146,6 +146,99 @@ def test_process_builds_argv_with_module_tool_args_ledger(tmp_path: Path) -> Non
 
 
 # -----------------------------------------------------------------------------
+# Determinism guard: the non-deterministic `prompt` (LLM) path is refused for
+# allowlisted tools; only the direct `endpoint` form (layer ③ replayable) runs.
+# -----------------------------------------------------------------------------
+
+def test_process_prompt_only_llm_path_is_rejected(tmp_path: Path) -> None:
+    """A truthy `prompt` with no `endpoint` routes the Biomni tool through its
+    in-tool LLM — non-deterministic, which breaks the deterministic-replay gate
+    (layer ③). The bridge must refuse it fail-loud rather than shell out and
+    fail cryptically, steering the caller to the `endpoint` form."""
+    d = _load_daemon()
+    called = {"ran": False}
+
+    def fake_run(argv, **kw):
+        called["ran"] = True
+        raise AssertionError("runner must not be invoked for the LLM path")
+
+    cfg = d.BridgeConfig(
+        server_cmd="PY runner.py",
+        tool_modules={"query_kegg": "database"},
+        ledger_path=tmp_path / "p.jsonl",
+        run=fake_run,
+    )
+    code, body = d.process_tool_request(
+        {"tool": "database.query_kegg", "args": {"prompt": "Find COVID pathways"}},
+        cfg,
+    )
+    assert code == 400
+    assert "endpoint" in body["error"].lower()
+    assert called["ran"] is False
+
+
+def test_process_prompt_none_with_endpoint_is_allowed(tmp_path: Path) -> None:
+    """query_kegg requires `prompt` as a positional arg (may be None); passing
+    `prompt=None` alongside a real `endpoint` is the deterministic path and must
+    NOT be rejected. Guards the determinism check against over-rejection."""
+    d = _load_daemon()
+    cfg = d.BridgeConfig(
+        server_cmd="PY runner.py",
+        tool_modules={"query_kegg": "database"},
+        ledger_path=tmp_path / "p.jsonl",
+        run=_runner_ok({"raw_text": "ENTRY hsa05171"}),
+    )
+    code, body = d.process_tool_request(
+        {
+            "tool": "database.query_kegg",
+            "args": {
+                "prompt": None,
+                "endpoint": "https://rest.kegg.jp/get/hsa05171",
+            },
+        },
+        cfg,
+    )
+    assert code == 200
+    assert body == {"result": {"raw_text": "ENTRY hsa05171"}}
+
+
+def test_process_second_tool_qualified_name_normalizes(tmp_path: Path) -> None:
+    """The allowlist/normalization machinery is tool-agnostic: a second tool
+    (query_kegg) qualified as `database.query_kegg` resolves to the bare key and
+    reaches the runner with the bare name + mapped module, exactly like the
+    first tool. Regression guard against tool-specific hardcoding."""
+    d = _load_daemon()
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps({"raw_text": "ENTRY hsa05171"})
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return _Proc()
+
+    cfg = d.BridgeConfig(
+        server_cmd="PY runner.py",
+        tool_modules={"query_kegg": "database"},
+        ledger_path=tmp_path / "p.jsonl",
+        run=fake_run,
+    )
+    code, _ = d.process_tool_request(
+        {
+            "tool": "database.query_kegg",
+            "args": {"prompt": None, "endpoint": "https://rest.kegg.jp/get/hsa05171"},
+        },
+        cfg,
+    )
+    assert code == 200
+    argv = captured["argv"]
+    assert argv[argv.index("--tool") + 1] == "query_kegg"
+    assert argv[argv.index("--module") + 1] == "database"
+
+
+# -----------------------------------------------------------------------------
 # Bug A: qualified `module.tool` names must normalize to the bare allowlist key
 # -----------------------------------------------------------------------------
 
