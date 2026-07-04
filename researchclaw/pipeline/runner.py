@@ -313,7 +313,7 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
             # Layer ④ — silent (returns None) unless config + summary contract
             # both supply what the oracle registry needs, so this is safe to
             # call unconditionally.
-            _recompute = run_recompute_gate(summary, _biomni_cfg)
+            _recompute = run_recompute_gate(summary, _biomni_cfg, ledger_path=_ledger)
             # A metric layer ④ independently reproduced from the (ranking,
             # positives) contract is derived, not raw — it never appears in the
             # ledger. Thread those names into ⑤ so claim-binding treats them as

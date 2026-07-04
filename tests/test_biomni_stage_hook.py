@@ -251,3 +251,43 @@ def test_build_entity_gate_loads_existing_db(tmp_path: Path) -> None:
     assert gate.drug_hashes == {h}
     assert gate.check({"drug": ["DB00001"]}).ok
     assert not gate.check({"drug": ["DBBAD"]}).ok
+
+
+def _stringdb_ledger(tmp_path: Path, edges: int, expected: int) -> Path:
+    led = tmp_path / "provenance.jsonl"
+    entry = {
+        "tool": "query_stringdb",
+        "raw_return": [{"number_of_edges": edges, "expected_number_of_edges": expected}],
+    }
+    led.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    return led
+
+
+def test_context_populates_network_from_ledger(tmp_path: Path) -> None:
+    led = _stringdb_ledger(tmp_path, 44, 1)
+    ctx = collect_recompute_context({}, ledger_path=led)
+    assert ctx is not None
+    assert ctx.network == {"number_of_edges": 44.0, "expected_number_of_edges": 1.0}
+
+
+def test_context_none_without_ranking_or_network() -> None:
+    assert collect_recompute_context({}, ledger_path=None) is None
+
+
+def test_recompute_gate_verifies_fold_from_ledger(tmp_path: Path) -> None:
+    led = _stringdb_ledger(tmp_path, 44, 1)
+    cfg = BiomniConfig(recompute_headline_metrics=("ppi_enrichment_fold",))
+    summary = {"metrics": {"ppi_enrichment_fold": 44.0}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert report.ok
+    assert any(name == "ppi_enrichment_fold" for name, _c, _r in report.verified)
+
+
+def test_recompute_gate_mismatch_when_claim_tampered(tmp_path: Path) -> None:
+    led = _stringdb_ledger(tmp_path, 44, 1)
+    cfg = BiomniConfig(recompute_headline_metrics=("ppi_enrichment_fold",))
+    summary = {"metrics": {"ppi_enrichment_fold": 99.0}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert not report.ok

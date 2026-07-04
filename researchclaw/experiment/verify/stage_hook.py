@@ -18,6 +18,7 @@ from typing import Any
 
 from researchclaw.experiment.verify.claim_binding import ClaimBindingReport, bind_claims
 from researchclaw.experiment.verify.entity_gate import EntityGate, EntityReport
+from researchclaw.experiment.verify.ledger_network import extract_ppi_enrichment
 from researchclaw.experiment.verify.oracle_registry import (
     RecomputeContext,
     build_covid_oracles,
@@ -96,40 +97,58 @@ def run_biomni_gates(
     return claim_report, entity_report
 
 
-def collect_recompute_context(summary: dict[str, Any]) -> RecomputeContext | None:
-    """Build a :class:`RecomputeContext` from the experiment summary.
+def collect_recompute_context(
+    summary: dict[str, Any], ledger_path: Path | None = None
+) -> RecomputeContext | None:
+    """Build a :class:`RecomputeContext` from the summary and (optionally) the ledger.
 
-    Layer ④ needs (ranking, positives) to recompute the headline metric. Both
-    must be present in the summary — when either is missing or malformed we
-    return ``None`` so the recompute gate stays silent (layer ④ only fires on
-    contradiction, never on absence).
+    Two independent input sources feed layer ④:
+
+    * ``ranking`` + ``positives`` (top level of the summary) — the ranking oracles;
+    * the ledger's most-recent query_stringdb ppi_enrichment return — the network
+      oracles (read from the *ledger*, never the summary, so the metric binds to a
+      provenance-anchored tool call).
+
+    Returns ``None`` only when neither source yields anything, so the recompute
+    gate stays silent on absence (layer ④ fires on contradiction, not absence).
     """
+    ranking: tuple[tuple[str, float], ...] = ()
+    positives: frozenset[str] = frozenset()
     ranking_raw = summary.get("ranking")
     positives_raw = summary.get("positives")
-    if not isinstance(ranking_raw, list) or not ranking_raw:
+    if (
+        isinstance(ranking_raw, list)
+        and ranking_raw
+        and isinstance(positives_raw, list)
+        and positives_raw
+    ):
+        try:
+            ranking = tuple((str(item[0]), float(item[1])) for item in ranking_raw)
+            positives = frozenset(str(p) for p in positives_raw)
+        except (TypeError, ValueError, IndexError):
+            ranking = ()
+            positives = frozenset()
+
+    network = None
+    if ledger_path is not None and Path(ledger_path).exists():
+        network = extract_ppi_enrichment(Path(ledger_path))
+
+    if not ranking and network is None:
         return None
-    if not isinstance(positives_raw, list) or not positives_raw:
-        return None
-    try:
-        ranking = tuple(
-            (str(item[0]), float(item[1])) for item in ranking_raw
-        )
-    except (TypeError, ValueError, IndexError):
-        return None
-    positives = frozenset(str(p) for p in positives_raw)
-    return RecomputeContext(ranking=ranking, positives=positives)
+    return RecomputeContext(ranking=ranking, positives=positives, network=network)
 
 
 def run_recompute_gate(
     summary: dict[str, Any],
     biomni_cfg: Any,
+    ledger_path: Path | None = None,
 ) -> RecomputeReport | None:
-    """Run layer ④ over *summary* if the configured oracles and inputs align.
+    """Run layer ④ over *summary* (+ ledger) if oracles and inputs align.
 
     Returns ``None`` — no report at all — when any prerequisite is missing:
 
     * ``recompute_headline_metrics`` is empty (layer ④ disabled by config);
-    * the summary has no ranking / positives to build a context from;
+    * neither a ranking/positives contract nor a ledger network return exists;
     * none of the configured names are registered in the oracle registry.
 
     Otherwise returns a :class:`RecomputeReport` that the runner folds into
@@ -139,7 +158,7 @@ def run_recompute_gate(
     metric_names = tuple(getattr(biomni_cfg, "recompute_headline_metrics", ()) or ())
     if not metric_names:
         return None
-    ctx = collect_recompute_context(summary)
+    ctx = collect_recompute_context(summary, ledger_path=ledger_path)
     if ctx is None:
         return None
     oracles = build_covid_oracles(metric_names, ctx)
