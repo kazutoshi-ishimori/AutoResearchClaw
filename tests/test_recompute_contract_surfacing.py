@@ -122,3 +122,21 @@ def test_entity_contract_round_trips_into_collect_claimed_entities() -> None:
 
     entities = collect_claimed_entities(summary)
     assert entities == {"drug": ["DB001", "DB002"]}
+
+
+def test_entity_contract_passes_through_written_genes() -> None:
+    from researchclaw.pipeline.stage_impls._analysis import _entity_contract_fields
+
+    res = {"entities": {"gene": ["ACE2", "TMPRSS2", "FURIN"]}}
+    assert _entity_contract_fields(res) == {
+        "entities": {"gene": ["ACE2", "TMPRSS2", "FURIN"]}
+    }
+
+
+def test_entity_contract_written_block_and_ranking_coexist() -> None:
+    from researchclaw.pipeline.stage_impls._analysis import _entity_contract_fields
+
+    res = {"entities": {"gene": ["ACE2"]}, "ranking": [["DB0001", 1.0]]}
+    assert _entity_contract_fields(res) == {
+        "entities": {"gene": ["ACE2"], "drug": ["DB0001"]}
+    }

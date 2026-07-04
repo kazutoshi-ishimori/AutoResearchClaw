@@ -58,28 +58,43 @@ def _recompute_contract_fields(structured_results: Any) -> dict[str, Any]:
 def _entity_contract_fields(structured_results: Any) -> dict[str, Any]:
     """Promote the layer-② entity contract from the canonical results.json.
 
-    ``stage_hook.collect_claimed_entities`` reads ``entities['drug']`` from the
-    top level of the summary. The drugs an experiment claims to have scored ARE
-    the ``drug_id``\\ s in its ``ranking``, so surface them as ``entities['drug']``
-    — giving the entity gate (layer ②) the same free-with-a-ranking treatment
-    the recompute oracle (layer ④) already gets. Pure and generic: malformed
-    ranking items are skipped and an absent/empty ranking yields ``{}`` so the
-    gate stays silent on absence, in parity with the rest of the stack.
+    ``stage_hook.collect_claimed_entities`` reads ``entities['<kind>']`` from the
+    top level of the summary. Two sources feed it:
+
+    * a directly-written ``entities`` block (gene / drug / pathway lists) — used
+      by experiments that name their identifiers explicitly (e.g. a gene set fed
+      to STRING); and
+    * the ``drug_id``\\ s in a ``ranking`` — surfaced as ``entities['drug']`` so a
+      ranking-only experiment still gets the gate for free (unless it already
+      wrote a drug block).
+
+    Pure and generic: malformed items are skipped and an absent contract yields
+    ``{}`` so the gate stays silent on absence, in parity with the rest of the
+    stack.
     """
     if not isinstance(structured_results, dict):
         return {}
-    ranking = structured_results.get("ranking")
-    if not isinstance(ranking, list) or not ranking:
+    out: dict[str, list[str]] = {}
+    written = structured_results.get("entities")
+    if isinstance(written, dict):
+        for kind in ("gene", "drug", "pathway"):
+            ids = written.get(kind)
+            if isinstance(ids, list) and ids:
+                out[kind] = [str(i) for i in ids]
+    if "drug" not in out:
+        ranking = structured_results.get("ranking")
+        if isinstance(ranking, list) and ranking:
+            drugs: list[str] = []
+            for item in ranking:
+                try:
+                    drugs.append(str(item[0]))
+                except (TypeError, IndexError, KeyError):
+                    continue
+            if drugs:
+                out["drug"] = drugs
+    if not out:
         return {}
-    drugs: list[str] = []
-    for item in ranking:
-        try:
-            drugs.append(str(item[0]))
-        except (TypeError, IndexError, KeyError):
-            continue
-    if not drugs:
-        return {}
-    return {"entities": {"drug": drugs}}
+    return {"entities": out}
 
 
 def _execute_result_analysis(
