@@ -802,14 +802,13 @@ def execute_pipeline(
         if result.status == StageStatus.DONE:
             _write_checkpoint(run_dir, stage, run_id, adapters=adapters)
 
-        # ── Stop after to_stage if specified ──
-        if to_stage is not None and stage == to_stage:
-            logger.info("[%s] Reached --to-stage %s, stopping.", run_id, stage.name)
-            print(f"[{run_id}] Reached --to-stage {stage.name}, stopping pipeline.")
-            break
-
-        # --- Experiment diagnosis + repair after Stage 14 (result_analysis) ---
-        if (
+        # --- Stage-14 result verification (biomni gates ①-⑤ + diagnosis) ---
+        # Runs BEFORE the --to-stage break so stopping AT result_analysis still
+        # verifies its own results rather than silently skipping the gates (a
+        # skipped gate reads as a false green). The repair loop — which may
+        # re-spawn the agent — stays AFTER the stop check, so an explicit
+        # --to-stage stop never triggers a costly repair.
+        _stage14_verify = (
             stage == Stage.RESULT_ANALYSIS
             and result.status == StageStatus.DONE
             and config.experiment.repair.enabled
@@ -821,9 +820,18 @@ def execute_pipeline(
             # python-code repair loop entirely; the proceed-or-reject decision
             # belongs in stage 15 RESEARCH_DECISION.
             and config.experiment.mode not in ("collider_agent", "biology_agent", "stat_agent")
-        ):
+        )
+        if _stage14_verify:
             _run_experiment_diagnosis(run_dir, config, run_id)
 
+        # ── Stop after to_stage if specified ──
+        if to_stage is not None and stage == to_stage:
+            logger.info("[%s] Reached --to-stage %s, stopping.", run_id, stage.name)
+            print(f"[{run_id}] Reached --to-stage {stage.name}, stopping pipeline.")
+            break
+
+        # --- Experiment repair after Stage 14 (result_analysis) ---
+        if _stage14_verify:
             # Check if repair loop should run
             _diag_path = run_dir / "experiment_diagnosis.json"
             if _diag_path.exists():
