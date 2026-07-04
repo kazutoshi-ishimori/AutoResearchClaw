@@ -155,3 +155,40 @@ def test_registry_with_no_positives_yields_nan_and_is_skipped() -> None:
     )
     oracle = build_covid_oracles(("auroc_phase2plus",), ctx)["auroc_phase2plus"]
     assert math.isnan(oracle())
+
+
+def test_ppi_enrichment_fold_oracle_recomputes_ratio() -> None:
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_edges": 44.0, "expected_number_of_edges": 1.0},
+    )
+    oracles = build_covid_oracles(("ppi_enrichment_fold",), ctx)
+    assert set(oracles) == {"ppi_enrichment_fold"}
+    assert oracles["ppi_enrichment_fold"]() == 44.0
+
+
+def test_ppi_enrichment_fold_zero_expected_is_nan() -> None:
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_edges": 44.0, "expected_number_of_edges": 0.0},
+    )
+    oracles = build_covid_oracles(("ppi_enrichment_fold",), ctx)
+    assert math.isnan(oracles["ppi_enrichment_fold"]())
+
+
+def test_ppi_enrichment_fold_dropped_without_network() -> None:
+    ctx = RecomputeContext(ranking=(), positives=frozenset())  # network defaults None
+    oracles = build_covid_oracles(("ppi_enrichment_fold",), ctx)
+    assert oracles == {}
+
+
+def test_network_default_keeps_ranking_oracles_working() -> None:
+    ctx = RecomputeContext(
+        ranking=(("D1", 2.0), ("D2", 1.0)),
+        positives=frozenset({"D1"}),
+    )
+    oracles = build_covid_oracles(("auroc_phase2plus",), ctx)
+    assert "auroc_phase2plus" in oracles
+    assert oracles["auroc_phase2plus"]() == 1.0

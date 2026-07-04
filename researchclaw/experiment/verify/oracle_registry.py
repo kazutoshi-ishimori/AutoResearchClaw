@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,9 @@ class RecomputeContext:
 
     ranking: tuple[tuple[str, float], ...]
     positives: frozenset[str]
+    # Ledger-sourced raw numbers for network oracles (e.g. STRING ppi_enrichment).
+    # None when the run has no such tool call. Never hashed by this module.
+    network: Mapping[str, float] | None = None
 
 
 def _auroc(ranking: tuple[tuple[str, float], ...], positives: frozenset[str]) -> float:
@@ -96,6 +99,27 @@ def _build_mean_rank_of_positives(ctx: RecomputeContext) -> Callable[[], float]:
     return lambda: _mean_rank_of_positives(ctx.ranking, ctx.positives)
 
 
+def _ppi_enrichment_fold(network: Mapping[str, float]) -> float:
+    """Observed/expected STRING interaction-edge ratio (network enrichment fold).
+
+    A *derived* metric: STRING returns the two raw counts, not their ratio, so
+    layer ④ must recompute it. Returns NaN when expected is missing or zero
+    (ratio undefined) — parity with the ranking oracles' empty-class NaN.
+    """
+    obs = network.get("number_of_edges")
+    exp = network.get("expected_number_of_edges")
+    if obs is None or exp is None or exp == 0:
+        return float("nan")
+    return float(obs) / float(exp)
+
+
+def _build_ppi_enrichment_fold(ctx: RecomputeContext) -> Callable[[], float] | None:
+    if ctx.network is None:
+        return None
+    net = dict(ctx.network)
+    return lambda: _ppi_enrichment_fold(net)
+
+
 # Only metrics that are (a) a deterministic function of (ranking, positives) and
 # (b) independent of how ties were broken when the ranking was serialised belong
 # here — layer ④ fires on contradiction, so a tie-break- or RNG-sensitive oracle
@@ -106,9 +130,10 @@ def _build_mean_rank_of_positives(ctx: RecomputeContext) -> Callable[[], float]:
 #   * perm_pvalue, auroc_ci_* — RNG-driven (label shuffles / bootstrap resamples)
 #     and not reproducible across processes without the exact random stream.
 #   * class_recall_at_k — needs per-drug class labels, which the context omits.
-_BUILDERS: dict[str, Callable[[RecomputeContext], Callable[[], float]]] = {
+_BUILDERS: dict[str, Callable[[RecomputeContext], Callable[[], float] | None]] = {
     "auroc_phase2plus": _build_auroc_phase2plus,
     "mean_rank_of_positives": _build_mean_rank_of_positives,
+    "ppi_enrichment_fold": _build_ppi_enrichment_fold,
 }
 
 
@@ -118,14 +143,19 @@ def build_covid_oracles(
 ) -> dict[str, Callable[[], float]]:
     """Translate the configured metric names into a dict of oracle closures.
 
-    Unknown names are silently dropped — see module docstring for rationale.
+    Unknown names are silently dropped. A registered builder that returns
+    ``None`` (its required inputs are absent from the context) is likewise
+    dropped, so layer ④ stays silent on absence.
     """
     oracles: dict[str, Callable[[], float]] = {}
     for name in metric_names:
         builder = _BUILDERS.get(name)
         if builder is None:
             continue
-        oracles[name] = builder(context)
+        oracle = builder(context)
+        if oracle is None:
+            continue
+        oracles[name] = oracle
     return oracles
 
 
