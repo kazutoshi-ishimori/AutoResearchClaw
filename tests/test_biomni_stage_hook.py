@@ -291,3 +291,50 @@ def test_recompute_gate_mismatch_when_claim_tampered(tmp_path: Path) -> None:
     report = run_recompute_gate(summary, cfg, ledger_path=led)
     assert report is not None
     assert not report.ok
+
+
+def _network_ledger(tmp_path: Path, scores: list[float]) -> Path:
+    led = tmp_path / "provenance.jsonl"
+    entry = {
+        "tool": "query_stringdb",
+        "raw_return": {
+            "success": True,
+            "result": [{"preferredName_A": "ACE2", "score": s} for s in scores],
+        },
+    }
+    led.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    return led
+
+
+def test_context_populates_interactions_from_ledger(tmp_path: Path) -> None:
+    # A-③: the stage hook must also surface the network edge scores into the
+    # context so the mean_interaction_score oracle can fire.
+    led = _network_ledger(tmp_path, [0.9, 0.6, 0.3])
+    ctx = collect_recompute_context({}, ledger_path=led)
+    assert ctx is not None
+    assert ctx.interactions == (0.9, 0.6, 0.3)
+
+
+def test_context_none_when_ledger_has_no_network_or_ranking(tmp_path: Path) -> None:
+    led = tmp_path / "provenance.jsonl"
+    led.write_text(json.dumps({"tool": "query_uniprot", "raw_return": {"length": 805}}) + "\n")
+    assert collect_recompute_context({}, ledger_path=led) is None
+
+
+def test_recompute_gate_verifies_mean_interaction_score_from_ledger(tmp_path: Path) -> None:
+    led = _network_ledger(tmp_path, [0.9, 0.6, 0.3])  # mean 0.6
+    cfg = BiomniConfig(recompute_headline_metrics=("mean_interaction_score",))
+    summary = {"metrics": {"mean_interaction_score": 0.6}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert report.ok
+    assert any(name == "mean_interaction_score" for name, _c, _r in report.verified)
+
+
+def test_recompute_gate_mismatch_when_mean_interaction_tampered(tmp_path: Path) -> None:
+    led = _network_ledger(tmp_path, [0.9, 0.6, 0.3])
+    cfg = BiomniConfig(recompute_headline_metrics=("mean_interaction_score",))
+    summary = {"metrics": {"mean_interaction_score": 0.99}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert not report.ok

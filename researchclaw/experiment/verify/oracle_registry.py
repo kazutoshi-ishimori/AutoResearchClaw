@@ -41,6 +41,9 @@ class RecomputeContext:
     # Ledger-sourced raw numbers for network oracles (e.g. STRING ppi_enrichment).
     # None when the run has no such tool call. Never hashed by this module.
     network: Mapping[str, float] | None = None
+    # Ledger-sourced per-edge scores from the STRING `network` endpoint, for the
+    # mean_interaction_score oracle. Independent of ``network``; None when absent.
+    interactions: tuple[float, ...] | None = None
 
 
 def _auroc(ranking: tuple[tuple[str, float], ...], positives: frozenset[str]) -> float:
@@ -145,6 +148,27 @@ def _build_avg_node_degree(ctx: RecomputeContext) -> Callable[[], float] | None:
     return lambda: _avg_node_degree(net)
 
 
+def _mean_interaction_score(interactions: tuple[float, ...]) -> float:
+    """Mean STRING combined-confidence score over the network's edges (Σscore/n).
+
+    A *list-aggregation* derived metric: the STRING ``network`` endpoint returns
+    a per-edge score list, not their mean, so layer ④ aggregates it from the
+    ledger. The mean of a score *multiset* is order-independent, so it is safe to
+    recompute regardless of the edge order STRING serialised. Returns NaN on an
+    empty edge list (mean undefined) — parity with the other oracles' NaN.
+    """
+    if not interactions:
+        return float("nan")
+    return sum(interactions) / len(interactions)
+
+
+def _build_mean_interaction_score(ctx: RecomputeContext) -> Callable[[], float] | None:
+    if ctx.interactions is None:
+        return None
+    scores = tuple(ctx.interactions)
+    return lambda: _mean_interaction_score(scores)
+
+
 # Only metrics that are (a) a deterministic function of (ranking, positives) and
 # (b) independent of how ties were broken when the ranking was serialised belong
 # here — layer ④ fires on contradiction, so a tie-break- or RNG-sensitive oracle
@@ -160,6 +184,7 @@ _BUILDERS: dict[str, Callable[[RecomputeContext], Callable[[], float] | None]] =
     "mean_rank_of_positives": _build_mean_rank_of_positives,
     "ppi_enrichment_fold": _build_ppi_enrichment_fold,
     "avg_node_degree": _build_avg_node_degree,
+    "mean_interaction_score": _build_mean_interaction_score,
 }
 
 

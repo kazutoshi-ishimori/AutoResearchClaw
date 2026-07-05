@@ -243,6 +243,46 @@ def test_both_network_oracles_fire_from_same_return() -> None:
     assert oracles["avg_node_degree"]() == 8.8
 
 
+def test_mean_interaction_score_oracle_aggregates_edges() -> None:
+    # A-③: Σscore/n = (0.9+0.6+0.3)/3 = 0.6, aggregated from the ledger edge
+    # list — a value STRING's network endpoint does not return directly.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        interactions=(0.9, 0.6, 0.3),
+    )
+    oracles = build_covid_oracles(("mean_interaction_score",), ctx)
+    assert set(oracles) == {"mean_interaction_score"}
+    assert oracles["mean_interaction_score"]() == 0.6
+
+
+def test_mean_interaction_score_empty_is_nan() -> None:
+    ctx = RecomputeContext(ranking=(), positives=frozenset(), interactions=())
+    oracles = build_covid_oracles(("mean_interaction_score",), ctx)
+    assert math.isnan(oracles["mean_interaction_score"]())
+
+
+def test_mean_interaction_score_dropped_without_interactions() -> None:
+    ctx = RecomputeContext(ranking=(), positives=frozenset())  # interactions None
+    oracles = build_covid_oracles(("mean_interaction_score",), ctx)
+    assert oracles == {}
+
+
+def test_network_oracles_independent_of_interaction_oracle() -> None:
+    # network dict (fold/degree) and interactions (mean score) are independent
+    # inputs; supplying one must not require the other.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        interactions=(1.0, 0.0),  # mean 0.5
+    )
+    oracles = build_covid_oracles(
+        ("ppi_enrichment_fold", "avg_node_degree", "mean_interaction_score"), ctx
+    )
+    assert set(oracles) == {"mean_interaction_score"}  # network-dict oracles drop
+    assert oracles["mean_interaction_score"]() == 0.5
+
+
 def test_network_default_keeps_ranking_oracles_working() -> None:
     ctx = RecomputeContext(
         ranking=(("D1", 2.0), ("D2", 1.0)),

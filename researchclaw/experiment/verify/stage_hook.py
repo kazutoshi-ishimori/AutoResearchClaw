@@ -18,7 +18,10 @@ from typing import Any
 
 from researchclaw.experiment.verify.claim_binding import ClaimBindingReport, bind_claims
 from researchclaw.experiment.verify.entity_gate import EntityGate, EntityReport
-from researchclaw.experiment.verify.ledger_network import extract_ppi_enrichment
+from researchclaw.experiment.verify.ledger_network import (
+    extract_interaction_scores,
+    extract_ppi_enrichment,
+)
 from researchclaw.experiment.verify.oracle_registry import (
     RecomputeContext,
     build_covid_oracles,
@@ -106,8 +109,12 @@ def collect_recompute_context(
 
     * ``ranking`` + ``positives`` (top level of the summary) — the ranking oracles;
     * the ledger's most-recent query_stringdb ppi_enrichment return — the network
-      oracles (read from the *ledger*, never the summary, so the metric binds to a
-      provenance-anchored tool call).
+      oracles (fold, avg degree);
+    * the ledger's most-recent query_stringdb ``network`` return — the
+      mean_interaction_score oracle (per-edge scores).
+
+    The two network sources are read from the *ledger*, never the summary, so
+    the metric binds to a provenance-anchored tool call.
 
     Returns ``None`` only when neither source yields anything, so the recompute
     gate stays silent on absence (layer ④ fires on contradiction, not absence).
@@ -130,12 +137,19 @@ def collect_recompute_context(
             positives = frozenset()
 
     network = None
+    interactions = None
     if ledger_path is not None and Path(ledger_path).exists():
         network = extract_ppi_enrichment(Path(ledger_path))
+        interactions = extract_interaction_scores(Path(ledger_path))
 
-    if not ranking and network is None:
+    if not ranking and network is None and interactions is None:
         return None
-    return RecomputeContext(ranking=ranking, positives=positives, network=network)
+    return RecomputeContext(
+        ranking=ranking,
+        positives=positives,
+        network=network,
+        interactions=interactions,
+    )
 
 
 def run_recompute_gate(

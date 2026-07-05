@@ -1,11 +1,20 @@
-"""Extract STRING ppi_enrichment fields from the provenance ledger (layer ④ input).
+"""Extract STRING network numbers from the provenance ledger (layer ④ input).
 
-Layer ④'s ``ppi_enrichment_fold`` oracle recomputes a derived metric from the
-*raw* STRING numbers the executor's observer recorded — never from anything the
-agent wrote into results.json. Reading from the ledger is what binds the metric
-to a real, provenance-anchored tool call. The ppi_enrichment endpoint returns a
-one-element list of dicts; an error return is a dict without the numeric fields,
-so we filter for entries that actually carry ``number_of_edges``.
+Layer ④'s oracles recompute derived metrics from the *raw* STRING numbers the
+executor's observer recorded — never from anything the agent wrote into
+results.json. Reading from the ledger is what binds a metric to a real,
+provenance-anchored tool call.
+
+Two distinct query_stringdb payload shapes are surfaced here:
+
+* the ``ppi_enrichment`` endpoint returns a one-element list of dicts carrying
+  ``number_of_edges`` etc. → :func:`extract_ppi_enrichment` (fold, avg degree);
+* the ``network`` endpoint returns a list of *edge* dicts each carrying a
+  combined ``score`` (0-1) → :func:`extract_interaction_scores` (mean score).
+
+Both arrive under the same tool name ``query_stringdb``, so each extractor
+disambiguates by payload shape (presence of ``number_of_edges`` vs ``score``).
+An error return is a dict without those fields and is filtered out.
 """
 from __future__ import annotations
 
@@ -66,3 +75,43 @@ def extract_ppi_enrichment(ledger_path: Path) -> dict[str, float] | None:
         except (TypeError, ValueError):
             pass
     return out
+
+
+def _edge_scores(raw_return: Any) -> list[float] | None:
+    """Per-edge ``score`` list from a network return, or ``None`` if not one.
+
+    A network return's ``result`` is a *list of edge dicts* each carrying a
+    ``score``. A ppi_enrichment return's single row has no ``score``, and an
+    error return has no ``result`` list — both yield ``None`` here.
+    """
+    result = raw_return.get("result", raw_return) if isinstance(raw_return, dict) else raw_return
+    if not isinstance(result, list) or not result:
+        return None
+    scores: list[float] = []
+    for row in result:
+        if not isinstance(row, dict) or "score" not in row:
+            return None
+        try:
+            scores.append(float(row["score"]))
+        except (TypeError, ValueError):
+            return None
+    return scores
+
+
+def extract_interaction_scores(ledger_path: Path) -> tuple[float, ...] | None:
+    """Per-edge combined scores from the most-recent query_stringdb network call.
+
+    Layer ④'s ``mean_interaction_score`` oracle aggregates these (Σscore/n) — a
+    value the tool does not return directly. Returns ``None`` when no
+    query_stringdb entry carries an edge list with scores (so the recompute gate
+    stays silent on absence, and a ppi_enrichment-only run is not misread).
+    """
+    latest: list[float] | None = None
+    for entry in _iter_ledger(Path(ledger_path)):
+        if entry.get("tool") != "query_stringdb":
+            continue
+        scores = _edge_scores(entry.get("raw_return"))
+        if scores is None:
+            continue
+        latest = scores
+    return tuple(latest) if latest is not None else None
