@@ -6,6 +6,7 @@ from pathlib import Path
 from researchclaw.experiment.verify.ledger_network import (
     extract_interaction_scores,
     extract_ppi_enrichment,
+    extract_uniprot_length,
 )
 
 
@@ -136,6 +137,66 @@ def test_returns_none_for_stringdb_error(tmp_path: Path) -> None:
     led = tmp_path / "p.jsonl"
     _write_ledger(led, [{"tool": "query_stringdb", "raw_return": {"success": False, "error": "boom"}}])
     assert extract_ppi_enrichment(led) is None
+
+
+def _uniprot_entry(length: int = 805, accession: str = "Q9BYF1") -> dict:
+    """A query_uniprot return for ACE2 — the REAL nested shape captured live:
+    the residue count lives at ``raw_return.result.sequence.length`` (under
+    ``sequence``, NOT directly at ``result.length``). A-④ binds this UniProt
+    anchor to the STRING edge count.
+    """
+    return {
+        "tool": "query_uniprot",
+        "args": {
+            "endpoint": f"https://rest.uniprot.org/uniprotkb/{accession}.json?fields=accession,id,sequence"
+        },
+        "raw_return": {
+            "success": True,
+            "query_info": {"endpoint": "uniprotkb"},
+            "result": {
+                "entryType": "UniProtKB reviewed (Swiss-Prot)",
+                "primaryAccession": accession,
+                "uniProtkbId": "ACE2_HUMAN",
+                "sequence": {
+                    "value": "MSSSS",
+                    "length": length,
+                    "molWeight": 92463,
+                    "crc64": "8EE6EB0A931550E8",
+                },
+            },
+        },
+        "sha256": "0ff1ce",
+        "ts": "2026-07-05T02:00:00+00:00",
+    }
+
+
+def test_extract_uniprot_length_returns_sequence_length(tmp_path: Path) -> None:
+    # A-④: the cross-tool oracle divides STRING edges by this UniProt residue count.
+    led = tmp_path / "p.jsonl"
+    _write_ledger(led, [_uniprot_entry(805)])
+    assert extract_uniprot_length(led) == 805.0
+
+
+def test_uniprot_length_none_without_uniprot(tmp_path: Path) -> None:
+    # A STRING-only ledger yields no protein length (gate silent on absence).
+    led = tmp_path / "p.jsonl"
+    _write_ledger(led, [_network_entry()])
+    assert extract_uniprot_length(led) is None
+
+
+def test_uniprot_length_none_when_sequence_missing(tmp_path: Path) -> None:
+    # A uniprot return without a nested sequence.length is not a valid anchor.
+    led = tmp_path / "p.jsonl"
+    entry = _uniprot_entry()
+    del entry["raw_return"]["result"]["sequence"]
+    _write_ledger(led, [entry])
+    assert extract_uniprot_length(led) is None
+
+
+def test_latest_uniprot_wins_for_length(tmp_path: Path) -> None:
+    led = tmp_path / "p.jsonl"
+    _write_ledger(led, [_uniprot_entry(1273, "P0DTC2"), _uniprot_entry(805, "Q9BYF1")])
+    assert extract_uniprot_length(led) == 805.0
 
 
 def test_latest_stringdb_wins(tmp_path: Path) -> None:

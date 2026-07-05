@@ -115,3 +115,42 @@ def extract_interaction_scores(ledger_path: Path) -> tuple[float, ...] | None:
             continue
         latest = scores
     return tuple(latest) if latest is not None else None
+
+
+def _sequence_length(raw_return: Any) -> float | None:
+    """UniProt residue count from a query_uniprot return, or ``None``.
+
+    The real payload nests the count at ``result.sequence.length`` (under
+    ``sequence``, not directly on ``result``). An error return or a record
+    without that nested field yields ``None``.
+    """
+    result = raw_return.get("result", raw_return) if isinstance(raw_return, dict) else raw_return
+    if not isinstance(result, dict):
+        return None
+    sequence = result.get("sequence")
+    if not isinstance(sequence, dict) or "length" not in sequence:
+        return None
+    try:
+        return float(sequence["length"])
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_uniprot_length(ledger_path: Path) -> float | None:
+    """Residue count from the most-recent query_uniprot call, or ``None``.
+
+    A-④'s cross-tool oracle divides the STRING edge count by this UniProt
+    sequence length — one derived metric bound to *two* provenance anchors
+    from two different tools. Returns ``None`` when no query_uniprot entry
+    carries a nested ``sequence.length`` (so the recompute gate stays silent
+    on absence).
+    """
+    latest: float | None = None
+    for entry in _iter_ledger(Path(ledger_path)):
+        if entry.get("tool") != "query_uniprot":
+            continue
+        length = _sequence_length(entry.get("raw_return"))
+        if length is None:
+            continue
+        latest = length
+    return latest
