@@ -184,6 +184,65 @@ def test_ppi_enrichment_fold_dropped_without_network() -> None:
     assert oracles == {}
 
 
+def test_avg_node_degree_oracle_recomputes_degree() -> None:
+    # A-②: 2*edges/nodes = 2*44/10 = 8.8, recomputed independently from the
+    # ledger counts (STRING returns average_node_degree, but the oracle derives
+    # it so the number the agent reports stays checkable).
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_nodes": 10.0, "number_of_edges": 44.0},
+    )
+    oracles = build_covid_oracles(("avg_node_degree",), ctx)
+    assert set(oracles) == {"avg_node_degree"}
+    assert oracles["avg_node_degree"]() == 8.8
+
+
+def test_avg_node_degree_zero_nodes_is_nan() -> None:
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_nodes": 0.0, "number_of_edges": 44.0},
+    )
+    oracles = build_covid_oracles(("avg_node_degree",), ctx)
+    assert math.isnan(oracles["avg_node_degree"]())
+
+
+def test_avg_node_degree_missing_nodes_is_nan() -> None:
+    # network present (fold still recomputable) but nodes absent — degree
+    # undefined, so the oracle returns NaN rather than raising.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_edges": 44.0, "expected_number_of_edges": 1.0},
+    )
+    oracles = build_covid_oracles(("avg_node_degree",), ctx)
+    assert math.isnan(oracles["avg_node_degree"]())
+
+
+def test_avg_node_degree_dropped_without_network() -> None:
+    ctx = RecomputeContext(ranking=(), positives=frozenset())  # network defaults None
+    oracles = build_covid_oracles(("avg_node_degree",), ctx)
+    assert oracles == {}
+
+
+def test_both_network_oracles_fire_from_same_return() -> None:
+    # The core A-② claim: one STRING return feeds two independent oracles.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={
+            "number_of_nodes": 10.0,
+            "number_of_edges": 44.0,
+            "expected_number_of_edges": 1.0,
+        },
+    )
+    oracles = build_covid_oracles(("ppi_enrichment_fold", "avg_node_degree"), ctx)
+    assert set(oracles) == {"ppi_enrichment_fold", "avg_node_degree"}
+    assert oracles["ppi_enrichment_fold"]() == 44.0
+    assert oracles["avg_node_degree"]() == 8.8
+
+
 def test_network_default_keeps_ranking_oracles_working() -> None:
     ctx = RecomputeContext(
         ranking=(("D1", 2.0), ("D2", 1.0)),

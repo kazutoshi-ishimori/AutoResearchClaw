@@ -50,9 +50,19 @@ def extract_ppi_enrichment(ledger_path: Path) -> dict[str, float] | None:
     if latest is None:
         return None
     try:
-        return {
+        out = {
             "number_of_edges": float(latest["number_of_edges"]),
             "expected_number_of_edges": float(latest["expected_number_of_edges"]),
         }
     except (TypeError, ValueError):
         return None
+    # number_of_nodes is the layer ④ input for the avg_node_degree oracle
+    # (2*edges/nodes). Surface it when present, but keep it optional — its
+    # absence must not drop an otherwise-valid enrichment row.
+    nodes = latest.get("number_of_nodes")
+    if nodes is not None:
+        try:
+            out["number_of_nodes"] = float(nodes)
+        except (TypeError, ValueError):
+            pass
+    return out

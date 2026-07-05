@@ -35,6 +35,29 @@ def test_extracts_edges_and_expected(tmp_path: Path) -> None:
     led = tmp_path / "p.jsonl"
     _write_ledger(led, [_stringdb_entry()])
     got = extract_ppi_enrichment(led)
+    assert got == {
+        "number_of_nodes": 10.0,
+        "number_of_edges": 44.0,
+        "expected_number_of_edges": 1.0,
+    }
+
+
+def test_extracts_number_of_nodes_for_avg_degree_oracle(tmp_path: Path) -> None:
+    """A-②: avg_node_degree = 2*edges/nodes needs number_of_nodes surfaced too."""
+    led = tmp_path / "p.jsonl"
+    _write_ledger(led, [_stringdb_entry()])
+    got = extract_ppi_enrichment(led)
+    assert got is not None
+    assert got["number_of_nodes"] == 10.0
+
+
+def test_omits_number_of_nodes_when_absent(tmp_path: Path) -> None:
+    """number_of_nodes is optional — its absence must not drop the whole row."""
+    led = tmp_path / "p.jsonl"
+    entry = _stringdb_entry()
+    del entry["raw_return"][0]["number_of_nodes"]
+    _write_ledger(led, [entry])
+    got = extract_ppi_enrichment(led)
     assert got == {"number_of_edges": 44.0, "expected_number_of_edges": 1.0}
 
 
@@ -57,4 +80,8 @@ def test_latest_stringdb_wins(tmp_path: Path) -> None:
     second["raw_return"][0]["number_of_edges"] = 50
     second["raw_return"][0]["expected_number_of_edges"] = 2
     _write_ledger(led, [first, second])
-    assert extract_ppi_enrichment(led) == {"number_of_edges": 50.0, "expected_number_of_edges": 2.0}
+    assert extract_ppi_enrichment(led) == {
+        "number_of_nodes": 10.0,
+        "number_of_edges": 50.0,
+        "expected_number_of_edges": 2.0,
+    }

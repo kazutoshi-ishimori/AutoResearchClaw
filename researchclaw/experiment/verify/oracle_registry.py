@@ -120,6 +120,31 @@ def _build_ppi_enrichment_fold(ctx: RecomputeContext) -> Callable[[], float] | N
     return lambda: _ppi_enrichment_fold(net)
 
 
+def _avg_node_degree(network: Mapping[str, float]) -> float:
+    """Undirected average node degree = 2*edges/nodes (derived from the ledger).
+
+    A second *derived* metric over the SAME STRING return the fold oracle uses.
+    STRING reports ``average_node_degree`` directly, but layer ④ recomputes it
+    independently from the two raw counts so the number the agent reports stays
+    checkable. Returns NaN when nodes is missing or zero (degree undefined) —
+    parity with the fold oracle's NaN on undefined ratio. That the two oracles
+    read the same network dict is exactly what lets a tamper on one metric
+    MISMATCH in isolation while the other stays verified.
+    """
+    edges = network.get("number_of_edges")
+    nodes = network.get("number_of_nodes")
+    if edges is None or nodes is None or nodes == 0:
+        return float("nan")
+    return 2.0 * float(edges) / float(nodes)
+
+
+def _build_avg_node_degree(ctx: RecomputeContext) -> Callable[[], float] | None:
+    if ctx.network is None:
+        return None
+    net = dict(ctx.network)
+    return lambda: _avg_node_degree(net)
+
+
 # Only metrics that are (a) a deterministic function of (ranking, positives) and
 # (b) independent of how ties were broken when the ranking was serialised belong
 # here — layer ④ fires on contradiction, so a tie-break- or RNG-sensitive oracle
@@ -134,6 +159,7 @@ _BUILDERS: dict[str, Callable[[RecomputeContext], Callable[[], float] | None]] =
     "auroc_phase2plus": _build_auroc_phase2plus,
     "mean_rank_of_positives": _build_mean_rank_of_positives,
     "ppi_enrichment_fold": _build_ppi_enrichment_fold,
+    "avg_node_degree": _build_avg_node_degree,
 }
 
 
