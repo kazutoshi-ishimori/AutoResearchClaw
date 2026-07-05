@@ -21,6 +21,7 @@ from researchclaw.experiment.verify.entity_gate import EntityGate, EntityReport
 from researchclaw.experiment.verify.ledger_network import (
     extract_interaction_scores,
     extract_ppi_enrichment,
+    extract_uniprot_length,
 )
 from researchclaw.experiment.verify.oracle_registry import (
     RecomputeContext,
@@ -111,10 +112,13 @@ def collect_recompute_context(
     * the ledger's most-recent query_stringdb ppi_enrichment return — the network
       oracles (fold, avg degree);
     * the ledger's most-recent query_stringdb ``network`` return — the
-      mean_interaction_score oracle (per-edge scores).
+      mean_interaction_score oracle (per-edge scores);
+    * the ledger's most-recent query_uniprot return — the UniProt residue length
+      for the cross-tool edges_per_ace2_residue oracle (A-④).
 
-    The two network sources are read from the *ledger*, never the summary, so
-    the metric binds to a provenance-anchored tool call.
+    These raw numbers are read from the *ledger*, never the summary, so the
+    metric binds to provenance-anchored tool calls — for the cross-tool oracle,
+    to two different tools' calls at once.
 
     Returns ``None`` only when neither source yields anything, so the recompute
     gate stays silent on absence (layer ④ fires on contradiction, not absence).
@@ -138,17 +142,25 @@ def collect_recompute_context(
 
     network = None
     interactions = None
+    protein_length = None
     if ledger_path is not None and Path(ledger_path).exists():
         network = extract_ppi_enrichment(Path(ledger_path))
         interactions = extract_interaction_scores(Path(ledger_path))
+        protein_length = extract_uniprot_length(Path(ledger_path))
 
-    if not ranking and network is None and interactions is None:
+    if (
+        not ranking
+        and network is None
+        and interactions is None
+        and protein_length is None
+    ):
         return None
     return RecomputeContext(
         ranking=ranking,
         positives=positives,
         network=network,
         interactions=interactions,
+        protein_length=protein_length,
     )
 
 

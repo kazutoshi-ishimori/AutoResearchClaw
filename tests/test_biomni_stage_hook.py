@@ -338,3 +338,52 @@ def test_recompute_gate_mismatch_when_mean_interaction_tampered(tmp_path: Path) 
     report = run_recompute_gate(summary, cfg, ledger_path=led)
     assert report is not None
     assert not report.ok
+
+
+def _cross_tool_ledger(tmp_path: Path, edges: int = 44, length: int = 805) -> Path:
+    """A-④: a ledger with TWO tools' returns — STRING ppi_enrichment (edge count)
+    AND query_uniprot ACE2 (residue length) — the two provenance anchors the
+    cross-tool oracle composes into one metric.
+    """
+    led = tmp_path / "provenance.jsonl"
+    stringdb = {
+        "tool": "query_stringdb",
+        "raw_return": [{"number_of_edges": edges, "expected_number_of_edges": 1}],
+    }
+    uniprot = {
+        "tool": "query_uniprot",
+        "raw_return": {"success": True, "result": {"sequence": {"length": length}}},
+    }
+    with led.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(stringdb) + "\n")
+        fh.write(json.dumps(uniprot) + "\n")
+    return led
+
+
+def test_context_populates_protein_length_from_ledger(tmp_path: Path) -> None:
+    # A-④: the stage hook must surface the UniProt residue length so the
+    # cross-tool oracle can bind it to the STRING edge count.
+    led = _cross_tool_ledger(tmp_path, edges=44, length=805)
+    ctx = collect_recompute_context({}, ledger_path=led)
+    assert ctx is not None
+    assert ctx.network == {"number_of_edges": 44.0, "expected_number_of_edges": 1.0}
+    assert ctx.protein_length == 805.0
+
+
+def test_recompute_gate_verifies_edges_per_ace2_residue_from_ledger(tmp_path: Path) -> None:
+    led = _cross_tool_ledger(tmp_path, edges=44, length=805)
+    cfg = BiomniConfig(recompute_headline_metrics=("edges_per_ace2_residue",))
+    summary = {"metrics": {"edges_per_ace2_residue": 44.0 / 805.0}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert report.ok
+    assert any(name == "edges_per_ace2_residue" for name, _c, _r in report.verified)
+
+
+def test_recompute_gate_mismatch_when_edges_per_residue_tampered(tmp_path: Path) -> None:
+    led = _cross_tool_ledger(tmp_path, edges=44, length=805)
+    cfg = BiomniConfig(recompute_headline_metrics=("edges_per_ace2_residue",))
+    summary = {"metrics": {"edges_per_ace2_residue": 0.999}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert not report.ok
