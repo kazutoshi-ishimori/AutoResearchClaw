@@ -44,6 +44,10 @@ class RecomputeContext:
     # Ledger-sourced per-edge scores from the STRING `network` endpoint, for the
     # mean_interaction_score oracle. Independent of ``network``; None when absent.
     interactions: tuple[float, ...] | None = None
+    # Ledger-sourced UniProt residue count (a DIFFERENT tool, query_uniprot), for
+    # the cross-tool edges_per_ace2_residue oracle. None when absent. The whole
+    # point of A-④: one metric bound to two provenance anchors from two tools.
+    protein_length: float | None = None
 
 
 def _auroc(ranking: tuple[tuple[str, float], ...], positives: frozenset[str]) -> float:
@@ -169,6 +173,31 @@ def _build_mean_interaction_score(ctx: RecomputeContext) -> Callable[[], float] 
     return lambda: _mean_interaction_score(scores)
 
 
+def _edges_per_residue(network: Mapping[str, float], protein_length: float) -> float:
+    """STRING edge count per UniProt residue = number_of_edges / sequence length.
+
+    A *cross-tool* derived metric: the edge count comes from ``query_stringdb``
+    and the residue length from ``query_uniprot`` — two different tools, two
+    different provenance anchors. Neither returns the ratio, so layer ④ composes
+    it. Returns NaN when the edge count is missing or the length is zero (ratio
+    undefined) — parity with the other oracles' NaN on an undefined quantity.
+    """
+    edges = network.get("number_of_edges")
+    if edges is None or protein_length == 0:
+        return float("nan")
+    return float(edges) / float(protein_length)
+
+
+def _build_edges_per_ace2_residue(ctx: RecomputeContext) -> Callable[[], float] | None:
+    # Requires BOTH anchors — the STRING network dict AND the UniProt length.
+    # Missing either drops the oracle, so a single-tool run stays silent.
+    if ctx.network is None or ctx.protein_length is None:
+        return None
+    net = dict(ctx.network)
+    length = float(ctx.protein_length)
+    return lambda: _edges_per_residue(net, length)
+
+
 # Only metrics that are (a) a deterministic function of (ranking, positives) and
 # (b) independent of how ties were broken when the ranking was serialised belong
 # here — layer ④ fires on contradiction, so a tie-break- or RNG-sensitive oracle
@@ -185,6 +214,7 @@ _BUILDERS: dict[str, Callable[[RecomputeContext], Callable[[], float] | None]] =
     "ppi_enrichment_fold": _build_ppi_enrichment_fold,
     "avg_node_degree": _build_avg_node_degree,
     "mean_interaction_score": _build_mean_interaction_score,
+    "edges_per_ace2_residue": _build_edges_per_ace2_residue,
 }
 
 

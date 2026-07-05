@@ -283,6 +283,68 @@ def test_network_oracles_independent_of_interaction_oracle() -> None:
     assert oracles["mean_interaction_score"]() == 0.5
 
 
+def test_edges_per_ace2_residue_binds_two_tools() -> None:
+    # A-④ core claim: ONE derived metric, TWO provenance anchors from TWO tools —
+    # STRING's edge count (44) ÷ UniProt's ACE2 residue length (805). Neither tool
+    # returns the ratio, so layer ④ composes it from both ledger sources.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_edges": 44.0, "expected_number_of_edges": 1.0},
+        protein_length=805.0,
+    )
+    oracles = build_covid_oracles(("edges_per_ace2_residue",), ctx)
+    assert set(oracles) == {"edges_per_ace2_residue"}
+    assert oracles["edges_per_ace2_residue"]() == 44.0 / 805.0
+
+
+def test_edges_per_ace2_residue_dropped_without_protein_length() -> None:
+    # STRING anchor present but UniProt anchor absent — the cross-tool oracle
+    # cannot compose, so it drops (layer ④ silent on absence).
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_edges": 44.0, "expected_number_of_edges": 1.0},
+    )
+    oracles = build_covid_oracles(("edges_per_ace2_residue",), ctx)
+    assert oracles == {}
+
+
+def test_edges_per_ace2_residue_dropped_without_network() -> None:
+    # UniProt anchor present but STRING anchor absent — likewise dropped.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        protein_length=805.0,
+    )
+    oracles = build_covid_oracles(("edges_per_ace2_residue",), ctx)
+    assert oracles == {}
+
+
+def test_edges_per_ace2_residue_zero_length_is_nan() -> None:
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"number_of_edges": 44.0, "expected_number_of_edges": 1.0},
+        protein_length=0.0,
+    )
+    oracles = build_covid_oracles(("edges_per_ace2_residue",), ctx)
+    assert math.isnan(oracles["edges_per_ace2_residue"]())
+
+
+def test_edges_per_ace2_residue_missing_edges_is_nan() -> None:
+    # protein_length present, network present but without number_of_edges —
+    # ratio undefined, so NaN rather than raising.
+    ctx = RecomputeContext(
+        ranking=(),
+        positives=frozenset(),
+        network={"expected_number_of_edges": 1.0},
+        protein_length=805.0,
+    )
+    oracles = build_covid_oracles(("edges_per_ace2_residue",), ctx)
+    assert math.isnan(oracles["edges_per_ace2_residue"]())
+
+
 def test_network_default_keeps_ranking_oracles_working() -> None:
     ctx = RecomputeContext(
         ranking=(("D1", 2.0), ("D2", 1.0)),
