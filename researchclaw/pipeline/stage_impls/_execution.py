@@ -129,6 +129,107 @@ def _estimate_stage12_footprint_bytes(run_dir: Path) -> int:
     return total
 
 
+# Known STRING/UniProt recompute oracles and how a free-form agent should
+# derive each from the deterministic tool returns. Keys MUST match the oracle
+# names registered in ``oracle_registry._BUILDERS`` so that layer ④ can
+# recompute them and layer ⑤ can bind them. The value is (endpoint hint,
+# recompute formula stated in the ledger's RAW field names). Formulas never
+# carry a numeric target — only field names and structural operators — so the
+# contract requires HONEST emission, never a coached value.
+_AGENTIC_RECOMPUTE_ORACLES: dict[str, tuple[str, str]] = {
+    "ppi_enrichment_fold": (
+        "STRING `ppi_enrichment` endpoint",
+        "number_of_edges / expected_number_of_edges",
+    ),
+    "avg_node_degree": (
+        "STRING `ppi_enrichment` endpoint",
+        "2 * number_of_edges / number_of_nodes",
+    ),
+    "mean_interaction_score": (
+        "STRING `network` endpoint",
+        "arithmetic mean of the per-edge `score` values",
+    ),
+    "edges_per_ace2_residue": (
+        "STRING `ppi_enrichment` endpoint + query_uniprot",
+        "number_of_edges / canonical UniProt sequence length",
+    ),
+}
+
+
+def _build_agentic_results_contract(config: RCConfig) -> str:
+    """Return the machine-readable results-emission contract for the agent.
+
+    The free-form agentic agent is handed a prose experiment plan; it is not
+    told the flat ``metrics`` shape the Biomni harness binds and recomputes.
+    This appends that contract, derived entirely from the configured
+    ``recompute_headline_metrics`` (config is the single source of truth):
+
+    * only names with a known STRING/UniProt oracle are instructed (unknown
+      names are silently omitted — nothing to recompute honestly);
+    * each instructed metric carries its ledger endpoint + recompute FORMULA,
+      never a target value;
+    * the primary ``metric_key`` (e.g. AUROC) is explicitly routed OUT of the
+      ledger-bound ``metrics`` object into ``study_findings`` — it depends on a
+      curated ground-truth list the harness cannot verify, so binding it would
+      false-red as a fabricated metric.
+
+    Returns ``""`` when no configured name maps to a known oracle (layer ④
+    disabled by config) — the caller then appends nothing.
+    """
+    biomni = getattr(config.experiment, "biomni", None)
+    configured = tuple(getattr(biomni, "recompute_headline_metrics", ()) or ())
+    instructed = [m for m in configured if m in _AGENTIC_RECOMPUTE_ORACLES]
+    if not instructed:
+        return ""
+
+    metric_key = getattr(config.experiment, "metric_key", "") or ""
+
+    derive_lines = []
+    for name in instructed:
+        endpoint, formula = _AGENTIC_RECOMPUTE_ORACLES[name]
+        derive_lines.append(
+            f"   - `{name}` = {formula}\n"
+            f"     (raw quantities from the {endpoint}, via the deterministic "
+            f"`endpoint=` form of the Biomni tool — NOT the free-text "
+            f"`prompt=` form)"
+        )
+    metrics_keys = ",\n      ".join(f'"{name}": <value>' for name in instructed)
+
+    excluded = (
+        f"   `{metric_key}` and every ground-truth-dependent result "
+        if metric_key
+        else "   AUROC, precision@k and every ground-truth-dependent result "
+    )
+
+    return (
+        "\n\n## RESULTS EMISSION CONTRACT (machine-readable — MANDATORY)\n\n"
+        "Your work is verified by a provenance harness that binds every number "
+        "under the results.json `metrics` object back to the Biomni tool "
+        "ledger and independently RECOMPUTES it. Emit under `metrics` ONLY the "
+        "ledger-derived quantities below, each computed at FULL floating-point "
+        "precision (do NOT round):\n\n"
+        + "\n".join(derive_lines)
+        + "\n\n"
+        "Report whatever value the tool returns actually produce — never a "
+        "preconceived number. If a required raw field is missing, OMIT that "
+        "metric rather than guessing.\n\n"
+        "Write `/workspace/results.json` in exactly this shape:\n\n"
+        "    {\n"
+        '      "metrics": {\n'
+        f"      {metrics_keys}\n"
+        "      },\n"
+        '      "study_findings": { ...AUROC, precision@k, drug rankings, prose... }\n'
+        "    }\n\n"
+        "The `metrics` object MUST contain EXACTLY the keys listed above and NO "
+        "others.\n"
+        + excluded
+        + "belong under `study_findings`: report them for the science, but they "
+        "are NOT ledger-verifiable (the positive-drug list is a curated upstream "
+        "input the harness cannot check), so they must never appear under "
+        "`metrics`.\n"
+    )
+
+
 def _execute_experiment_run(
     stage_dir: Path,
     run_dir: Path,
@@ -317,6 +418,11 @@ def _execute_experiment_run(
                 "Run the experiment for the configured topic. "
                 "Write final metrics to results.json in your working directory.\n"
             )
+
+        # Append the machine-readable results-emission contract so the free-form
+        # agent writes a flat, ledger-bindable ``metrics`` object (layers ④/⑤).
+        # No-op when no recompute oracle is configured.
+        prompt_text = prompt_text + _build_agentic_results_contract(config)
 
         ag_cfg = config.experiment.agentic
         workspace = runs_dir / "agentic_workspace"

@@ -878,6 +878,78 @@ def _check_rl_compatibility(code: str) -> list[str]:
     return errors
 
 
+def _build_stage10_guidance(
+    config: RCConfig,
+    prompts: "PromptManager | None",
+    *,
+    metric: str,
+) -> str:
+    """Assemble the mode-aware Stage 10 code-generation guidance string.
+
+    The runnable-metric contract (``_validate_stage10_runnable_metric_contract``)
+    is enforced for EVERY experiment mode, so its guidance must reach every mode
+    too — including ``agentic``. Sandbox/docker-specific blocks (dataset,
+    network, hp-reporting, multi-seed, single-cell data contract, tabular CPU
+    budget) remain gated to those modes.
+    """
+    _pm = prompts or PromptManager()
+    extra_guidance = ""
+    # The runnable-metric contract is validated for ALL modes, so its guidance
+    # is ungated here — otherwise agentic mode is asked to satisfy a build-time
+    # contract it was never told about.
+    extra_guidance += _stage10_runnable_metric_guidance(metric=metric)
+    _net_policy = getattr(getattr(config, "docker", None), "network_policy", "setup_only")
+    if config.experiment.mode in ("sandbox", "docker"):
+        _net_policy = (
+            config.experiment.docker.network_policy
+            if config.experiment.mode == "docker"
+            else "none"  # sandbox mode has no network
+        )
+        if _net_policy == "none":
+            # Network disabled: inject strict offline-only guidance
+            try:
+                extra_guidance += _pm.block("network_disabled_guidance")
+            except Exception:  # noqa: BLE001
+                pass
+        elif _net_policy == "full":
+            try:
+                extra_guidance += _pm.block("dataset_guidance")
+                extra_guidance += _pm.block("network_full_guidance")
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # setup_only or pip_only — existing behavior
+            try:
+                extra_guidance += _pm.block("dataset_guidance")
+            except Exception:  # noqa: BLE001
+                pass
+            if config.experiment.mode == "docker":
+                try:
+                    extra_guidance += _pm.block("setup_script_guidance")
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            extra_guidance += _pm.block("hp_reporting")
+        except Exception:  # noqa: BLE001
+            pass
+        # I-06: Multi-seed enforcement for all experiments
+        try:
+            extra_guidance += _pm.block("multi_seed_enforcement")
+        except Exception:  # noqa: BLE001
+            pass
+        extra_guidance += _stage10_data_contract_guidance(
+            topic=config.research.topic,
+            experiment_mode=config.experiment.mode,
+            network_policy=_net_policy,
+        )
+        extra_guidance += _stage10_tabular_cpu_budget_guidance(
+            topic=config.research.topic,
+            experiment_mode=config.experiment.mode,
+            network_policy=_net_policy,
+        )
+    return extra_guidance
+
+
 def _execute_code_generation(
     stage_dir: Path,
     run_dir: Path,
@@ -966,57 +1038,7 @@ def _execute_code_generation(
         )
 
     # --- Dataset guidance + setup script + HP reporting (docker/sandbox modes) ---
-    extra_guidance = ""
-    _net_policy = getattr(getattr(config, "docker", None), "network_policy", "setup_only")
-    if config.experiment.mode in ("sandbox", "docker"):
-        _net_policy = (
-            config.experiment.docker.network_policy
-            if config.experiment.mode == "docker"
-            else "none"  # sandbox mode has no network
-        )
-        if _net_policy == "none":
-            # Network disabled: inject strict offline-only guidance
-            try:
-                extra_guidance += _pm.block("network_disabled_guidance")
-            except Exception:  # noqa: BLE001
-                pass
-        elif _net_policy == "full":
-            try:
-                extra_guidance += _pm.block("dataset_guidance")
-                extra_guidance += _pm.block("network_full_guidance")
-            except Exception:  # noqa: BLE001
-                pass
-        else:
-            # setup_only or pip_only — existing behavior
-            try:
-                extra_guidance += _pm.block("dataset_guidance")
-            except Exception:  # noqa: BLE001
-                pass
-            if config.experiment.mode == "docker":
-                try:
-                    extra_guidance += _pm.block("setup_script_guidance")
-                except Exception:  # noqa: BLE001
-                    pass
-        try:
-            extra_guidance += _pm.block("hp_reporting")
-        except Exception:  # noqa: BLE001
-            pass
-        # I-06: Multi-seed enforcement for all experiments
-        try:
-            extra_guidance += _pm.block("multi_seed_enforcement")
-        except Exception:  # noqa: BLE001
-            pass
-        extra_guidance += _stage10_data_contract_guidance(
-            topic=config.research.topic,
-            experiment_mode=config.experiment.mode,
-            network_policy=_net_policy,
-        )
-        extra_guidance += _stage10_runnable_metric_guidance(metric=metric)
-        extra_guidance += _stage10_tabular_cpu_budget_guidance(
-            topic=config.research.topic,
-            experiment_mode=config.experiment.mode,
-            network_policy=_net_policy,
-        )
+    extra_guidance = _build_stage10_guidance(config, _pm, metric=metric)
 
     # --- BA: Inject BenchmarkAgent plan from Stage 9 ---
     _bp_path = None

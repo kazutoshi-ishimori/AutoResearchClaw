@@ -12,6 +12,7 @@ from researchclaw.llm.client import LLMResponse
 from researchclaw.pipeline.stages import StageStatus
 from researchclaw.pipeline.stage_impls._code_generation import (
     _Stage10TimeoutError,
+    _build_stage10_guidance,
     _execute_code_generation,
     _run_with_stage10_timeout,
     _repair_tabular_cpu_budget_contract,
@@ -22,6 +23,7 @@ from researchclaw.pipeline.stage_impls._code_generation import (
     _validate_stage10_runnable_metric_contract,
     _validate_tabular_cpu_budget_contract,
 )
+from researchclaw.prompts.manager import PromptManager
 
 
 class FakeLLM:
@@ -73,6 +75,79 @@ def _single_cell_config(tmp_path: Path) -> RCConfig:
         project_root=tmp_path,
         check_paths=False,
     )
+
+
+def _repurposing_config(tmp_path: Path, mode: str) -> RCConfig:
+    """Network-medicine (non single-cell) config parameterised by experiment mode."""
+    return RCConfig.from_dict(
+        {
+            "project": {"name": "rc-test", "mode": "full-auto"},
+            "research": {
+                "topic": (
+                    "Computational drug-repurposing analysis for idiopathic "
+                    "pulmonary fibrosis using STRING PPI neighbourhoods and "
+                    "UniProt protein features"
+                ),
+                "domains": ["network-medicine"],
+                "daily_paper_count": 2,
+                "quality_threshold": 4.0,
+            },
+            "runtime": {"timezone": "UTC"},
+            "notifications": {"channel": "console"},
+            "knowledge_base": {"backend": "markdown", "root": str(tmp_path / "kb")},
+            "openclaw_bridge": {},
+            "llm": {
+                "provider": "openai-compatible",
+                "base_url": "http://localhost:1234/v1",
+                "api_key_env": "RC_TEST_KEY",
+                "api_key": "test",
+                "primary_model": "fake-model",
+                "fallback_models": [],
+            },
+            "security": {"hitl_required_stages": []},
+            "experiment": {
+                "mode": mode,
+                "time_budget_sec": 1800,
+                "metric_key": "auroc_ipf",
+                "metric_direction": "maximize",
+                "opencode": {"enabled": False},
+                "code_agent": {"enabled": False},
+            },
+        },
+        project_root=tmp_path,
+        check_paths=False,
+    )
+
+
+def test_runnable_metric_guidance_reaches_agentic_mode(tmp_path: Path) -> None:
+    """The runnable-metric contract is validated for ALL modes (ungated at
+    _validate_stage10_runnable_metric_contract), so its GUIDANCE must also reach
+    agentic mode. Regression: guidance was gated to sandbox/docker only, so the
+    agentic code-gen was asked to satisfy a contract it was never told about."""
+    cfg = _repurposing_config(tmp_path, mode="agentic")
+    guidance = _build_stage10_guidance(cfg, PromptManager(), metric="auroc_ipf")
+    assert "STAGE 10 RUNNABLE METRIC CONTRACT" in guidance
+    assert "auroc_ipf: <float>" in guidance
+
+
+def test_runnable_metric_guidance_still_present_in_docker_mode(tmp_path: Path) -> None:
+    """Regression guard: hoisting the metric guidance out of the mode gate must
+    not drop it from the sandbox/docker path that already relied on it."""
+    cfg = _repurposing_config(tmp_path, mode="docker")
+    guidance = _build_stage10_guidance(cfg, PromptManager(), metric="auroc_ipf")
+    assert "STAGE 10 RUNNABLE METRIC CONTRACT" in guidance
+    assert "auroc_ipf: <float>" in guidance
+
+
+def test_agentic_mode_stays_lean_beyond_metric_contract(tmp_path: Path) -> None:
+    """Only the runnable-metric contract is hoisted. Sandbox/docker-specific
+    blocks (e.g. multi-seed enforcement) must NOT leak into agentic guidance."""
+    pm = PromptManager()
+    cfg = _repurposing_config(tmp_path, mode="agentic")
+    guidance = _build_stage10_guidance(cfg, pm, metric="auroc_ipf")
+    multi_seed_block = pm.block("multi_seed_enforcement")
+    assert multi_seed_block
+    assert multi_seed_block not in guidance
 
 
 def test_stage10_contract_rejects_missing_generated_npz_for_single_cell() -> None:
