@@ -58,3 +58,21 @@ def test_parses_bridge_url_for_phase2_container_routing() -> None:
 def test_tool_allowlist_accepts_single_string() -> None:
     exp = _parse_experiment_config({"biomni": {"tool_allowlist": "query_gene"}})
     assert exp.biomni.tool_allowlist == ("query_gene",)
+
+
+def test_parses_recompute_identifiers_seed_module() -> None:
+    """The principled layer-④ anchor: the study's a-priori seed-gene module."""
+    exp = _parse_experiment_config(
+        {
+            "biomni": {
+                "recompute_identifiers": ["MUC5B", "TERT", "TGFB1"],
+            }
+        }
+    )
+    assert exp.biomni.recompute_identifiers == ("MUC5B", "TERT", "TGFB1")
+
+
+def test_recompute_identifiers_defaults_empty() -> None:
+    """Absent → empty tuple → extractors keep legacy 'latest' behaviour."""
+    exp = _parse_experiment_config({"biomni": {}})
+    assert exp.biomni.recompute_identifiers == ()

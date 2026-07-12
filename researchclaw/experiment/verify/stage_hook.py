@@ -102,7 +102,9 @@ def run_biomni_gates(
 
 
 def collect_recompute_context(
-    summary: dict[str, Any], ledger_path: Path | None = None
+    summary: dict[str, Any],
+    ledger_path: Path | None = None,
+    select_identifiers: frozenset[str] | None = None,
 ) -> RecomputeContext | None:
     """Build a :class:`RecomputeContext` from the summary and (optionally) the ledger.
 
@@ -144,8 +146,12 @@ def collect_recompute_context(
     interactions = None
     protein_length = None
     if ledger_path is not None and Path(ledger_path).exists():
-        network = extract_ppi_enrichment(Path(ledger_path))
-        interactions = extract_interaction_scores(Path(ledger_path))
+        network = extract_ppi_enrichment(
+            Path(ledger_path), select_identifiers=select_identifiers
+        )
+        interactions = extract_interaction_scores(
+            Path(ledger_path), select_identifiers=select_identifiers
+        )
         protein_length = extract_uniprot_length(Path(ledger_path))
 
     if (
@@ -184,7 +190,11 @@ def run_recompute_gate(
     metric_names = tuple(getattr(biomni_cfg, "recompute_headline_metrics", ()) or ())
     if not metric_names:
         return None
-    ctx = collect_recompute_context(summary, ledger_path=ledger_path)
+    identifiers = tuple(getattr(biomni_cfg, "recompute_identifiers", ()) or ())
+    select_identifiers = frozenset(identifiers) if identifiers else None
+    ctx = collect_recompute_context(
+        summary, ledger_path=ledger_path, select_identifiers=select_identifiers
+    )
     if ctx is None:
         return None
     oracles = build_covid_oracles(metric_names, ctx)

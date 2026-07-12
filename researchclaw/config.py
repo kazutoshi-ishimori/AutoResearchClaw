@@ -573,6 +573,12 @@ class BiomniConfig:
     replay_tolerance: float = 1e-9
     # Headline metrics to independently recompute (layer ④) — empty in Phase 0.
     recompute_headline_metrics: tuple[str, ...] = ()
+    # Study's a-priori seed-gene module for principled layer-④ selection. When
+    # set, the network oracles recompute from the ledger entry whose queried
+    # gene set exactly equals this module — the claim-INDEPENDENT anchor that
+    # survives free-form agents that probe STRING many times. Empty → legacy
+    # 'most-recent matching entry' selection (fine for strict two-step scripts).
+    recompute_identifiers: tuple[str, ...] = ()
     # Phase 2 (②): host-bridge URL for containerised agentic flows. When empty,
     # the legacy direct-subprocess path (Phase 1) is used. When set, the
     # container-side ``biomni_client.py`` POSTs tool calls to this URL and the
@@ -1305,6 +1311,9 @@ def _parse_biomni_config(data: dict[str, Any]) -> BiomniConfig:
     recompute_raw = data.get("recompute_headline_metrics", ())
     if isinstance(recompute_raw, str):
         recompute_raw = [recompute_raw]
+    identifiers_raw = data.get("recompute_identifiers", ())
+    if isinstance(identifiers_raw, str):
+        identifiers_raw = [identifiers_raw]
     return BiomniConfig(
         server_cmd=data.get("server_cmd", ""),
         tool_allowlist=tuple(allow_raw),
@@ -1315,6 +1324,7 @@ def _parse_biomni_config(data: dict[str, Any]) -> BiomniConfig:
         replay_enabled=bool(data.get("replay_enabled", False)),
         replay_tolerance=float(data.get("replay_tolerance", 1e-9)),
         recompute_headline_metrics=tuple(recompute_raw),
+        recompute_identifiers=tuple(identifiers_raw),
         bridge_url=data.get("bridge_url", ""),
     )
 

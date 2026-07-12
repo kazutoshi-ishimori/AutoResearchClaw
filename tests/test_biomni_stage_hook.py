@@ -293,6 +293,98 @@ def test_recompute_gate_mismatch_when_claim_tampered(tmp_path: Path) -> None:
     assert not report.ok
 
 
+# ── principled seed-module selection threaded config → gate ─────────────────
+
+_IPF_SEED = ("MUC5B", "TERT", "TERC", "TOLLIP", "DSP", "AKAP13", "TGFB1", "COL1A1", "SFTPC")
+
+
+def _seed_endpoint(kind: str, idents: tuple[str, ...]) -> str:
+    joined = "%0d".join(idents)
+    return f"https://version-12-0.string-db.org/api/json/{kind}?identifiers={joined}&species=9606"
+
+
+def _freeform_ipf_ledger(tmp_path: Path) -> Path:
+    """A free-form agent's ledger: the canonical 9-gene seed calls FIRST, then a
+    degenerate 5-gene exploratory subset LAST (the honest-red trap)."""
+    subset = ("TERT", "TERC", "TOLLIP", "DSP", "AKAP13")
+    entries = [
+        {  # canonical seed ppi_enrichment: fold = 9/1 = 9.0
+            "tool": "query_stringdb",
+            "args": {"endpoint": _seed_endpoint("ppi_enrichment", _IPF_SEED)},
+            "raw_return": [
+                {"number_of_nodes": 9, "number_of_edges": 9, "expected_number_of_edges": 1}
+            ],
+        },
+        {  # canonical seed network: mean = 0.6
+            "tool": "query_stringdb",
+            "args": {"endpoint": _seed_endpoint("network", _IPF_SEED)},
+            "raw_return": {"result": [{"score": 0.6}, {"score": 0.6}]},
+        },
+        {  # LATEST ppi_enrichment: degenerate subset (would give fold nan)
+            "tool": "query_stringdb",
+            "args": {"endpoint": _seed_endpoint("ppi_enrichment", subset)},
+            "raw_return": [
+                {"number_of_nodes": 5, "number_of_edges": 1, "expected_number_of_edges": 0}
+            ],
+        },
+        {  # LATEST network: degenerate subset (would give mean 0.99)
+            "tool": "query_stringdb",
+            "args": {"endpoint": _seed_endpoint("network", subset)},
+            "raw_return": {"result": [{"score": 0.99}]},
+        },
+    ]
+    led = tmp_path / "provenance.jsonl"
+    with led.open("w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+    return led
+
+
+def test_context_threads_select_identifiers_to_extractors(tmp_path: Path) -> None:
+    """collect_recompute_context must pick the seed module, not the latest subset."""
+    led = _freeform_ipf_ledger(tmp_path)
+    ctx = collect_recompute_context(
+        {}, ledger_path=led, select_identifiers=frozenset(_IPF_SEED)
+    )
+    assert ctx is not None
+    assert ctx.network == {
+        "number_of_nodes": 9.0,
+        "number_of_edges": 9.0,
+        "expected_number_of_edges": 1.0,
+    }
+    assert ctx.interactions == (0.6, 0.6)
+
+
+def test_gate_reads_recompute_identifiers_from_config(tmp_path: Path) -> None:
+    """Positive control: honest claims against a free-form ledger verify GREEN
+    once the config seed module anchors the oracle to the canonical calls."""
+    led = _freeform_ipf_ledger(tmp_path)
+    cfg = BiomniConfig(
+        recompute_headline_metrics=("ppi_enrichment_fold", "mean_interaction_score"),
+        recompute_identifiers=_IPF_SEED,
+    )
+    summary = {"metrics": {"ppi_enrichment_fold": 9.0, "mean_interaction_score": 0.6}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert report.ok, report.mismatched
+
+
+def test_gate_seed_anchor_still_catches_fabrication(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL: the fix only changes WHICH entry is recomputed — the
+    arithmetic check must be untouched. A poisoned mean against the same seed
+    ledger must still MISMATCH (else the oracle was coached to the claim)."""
+    led = _freeform_ipf_ledger(tmp_path)
+    cfg = BiomniConfig(
+        recompute_headline_metrics=("mean_interaction_score",),
+        recompute_identifiers=_IPF_SEED,
+    )
+    summary = {"metrics": {"mean_interaction_score": 0.999}}
+    report = run_recompute_gate(summary, cfg, ledger_path=led)
+    assert report is not None
+    assert not report.ok
+    assert any(name == "mean_interaction_score" for name, *_ in report.mismatched)
+
+
 def _network_ledger(tmp_path: Path, scores: list[float]) -> Path:
     led = tmp_path / "provenance.jsonl"
     entry = {
